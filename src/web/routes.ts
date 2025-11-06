@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { getAuthedClient } from '../auth/google.js';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
@@ -29,18 +28,30 @@ router.post('/ingest', async (req, res) => {
 });
 
 function render(tpl: string, items: any[]) {
-  const rows = items.map(x => `
+  const rows = items.map(x => {
+    const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
+    const when = emailTs.toLocaleString();
+    return `
     <div class="card">
       <div class="subject">${escapeHtml(x.Thread.subject || '(no subject)')}</div>
-      <div class="meta">${new Date(x.createdAt).toLocaleString()} • ${x.category} • ${x.confidence}</div>
+      <div class="meta">${when} • ${escapeHtml(x.category)} • ${formatConfidence(x.confidence)}</div>
       <p>${escapeHtml(x.tldr)}</p>
       <p class="next">Next: ${escapeHtml(x.nextStep || 'None')}</p>
       <a href="https://mail.google.com/mail/u/0/#all/${x.threadId}" target="_blank">Open in Gmail</a>
     </div>
-  `).join('\n');
+  `;
+  }).join('\n');
   return tpl.replace('<!--ROWS-->', rows);
 }
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+}
+
+function formatConfidence(conf: string) {
+  // Temporary; we’ll refine later. Ensures “High Confidence” / “Low Confidence”.
+  const c = (conf || '').toLowerCase();
+  if (c.startsWith('high')) return 'High Confidence';
+  if (c.startsWith('med')) return 'Medium Confidence';
+  return 'Low Confidence';
 }
