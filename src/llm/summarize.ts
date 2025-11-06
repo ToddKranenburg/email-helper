@@ -33,7 +33,7 @@ OUTPUT: Return STRICT JSON with keys exactly: tldr, category, next_step, confide
 
 CONSTRAINTS:
 - "category" MUST be one of:
-  -> Marketing/Promotion: bulk emails, promos, newsletters, invites to marketing/promo events etc. the sender is a good clue -- is it corporate/branded?
+  -> Marketing/Promotion: bulk emails, promos, newsletters, invites to marketing/promo events etc. the sender is a good clue -- is it corporate/branded? marketing@... info@...?
   -> Personal Event: non promotional -- should be personal, or an event i've actively decided to attend
   -> Billing: need to pay, receipt, payment failed, upcoming payment, etc...
   -> Introduction: someone personally introducing me to another person
