@@ -7,7 +7,6 @@ import type { Request } from 'express';
 
 function parseFrom(headerValue: string | undefined): { name?: string; email?: string } {
   if (!headerValue) return {};
-  // e.g., "Jane Doe <jane@example.com>" or just "jane@example.com"
   const emailMatch = headerValue.match(/<([^>]+)>/);
   const email = emailMatch ? emailMatch[1].trim() : (/@/.test(headerValue) ? headerValue.trim() : undefined);
   let name: string | undefined = undefined;
@@ -45,6 +44,7 @@ export async function ingestInbox(req: Request) {
       const subject = hdrs.find(h => h.name === 'Subject')?.value || '';
       const fromRaw = hdrs.find(h => h.name === 'From')?.value;
       const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
+      const latestMsgId = latest?.id!;
 
       const participants = Array.from(
         new Set(
@@ -76,13 +76,17 @@ export async function ingestInbox(req: Request) {
         }
       });
 
+      // Skip if we've already summarized this latest message
+      const existing = await prisma.summary.findUnique({ where: { lastMsgId: latestMsgId } });
+      if (existing) return;
+
       const convoText = msgs
         .map(m => normalizeBody(m.payload))
         .filter(Boolean)
         .reverse()
         .join('\n\n---\n\n');
 
-      await summarizeAndStore(full.data.id!, subject, participants, convoText);
+      await summarizeAndStore(full.data.id!, latestMsgId, subject, participants, convoText);
     })));
 
     pageToken = list.data.nextPageToken || undefined;
@@ -90,11 +94,18 @@ export async function ingestInbox(req: Request) {
 }
 
 import { summarize } from '../llm/summarize.js';
-async function summarizeAndStore(threadId: string, subject: string, people: string[], convoText: string) {
+async function summarizeAndStore(
+  threadId: string,
+  lastMsgId: string,
+  subject: string,
+  people: string[],
+  convoText: string
+) {
   const s = await summarize({ subject, people, convoText });
   await prisma.summary.create({
     data: {
       threadId,
+      lastMsgId,
       tldr: s.tldr,
       category: s.category,
       nextStep: s.next_step,

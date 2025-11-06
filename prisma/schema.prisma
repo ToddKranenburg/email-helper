@@ -3,17 +3,16 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite" // will switch to postgresql on Render later
+  provider = "sqlite"
   url      = "file:./dev.db"
 }
 
 model Thread {
   id             String   @id
   subject        String?
-  participants   String   // JSON string of addresses
+  participants   String
   lastMessageTs  DateTime
   historyId      String?
-  // NEW: last sender info for display
   fromName       String?
   fromEmail      String?
 
@@ -26,12 +25,16 @@ model Thread {
 model Summary {
   id          String   @id @default(cuid())
   threadId    String
+  // NEW: tie summary to the latest Gmail message ID we processed
+  lastMsgId   String   @unique
   tldr        String
   category    String
   nextStep    String
   confidence  String
   createdAt   DateTime @default(now())
   Thread      Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
 }
 
 model Processing {
