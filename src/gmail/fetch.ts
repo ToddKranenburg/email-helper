@@ -106,6 +106,7 @@ async function summarizeAndStore(
     data: {
       threadId,
       lastMsgId,
+      headline: s.headline || '',
       tldr: s.tldr,
       category: s.category,
       nextStep: s.next_step,
