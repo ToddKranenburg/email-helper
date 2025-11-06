@@ -6,7 +6,15 @@ import path from 'node:path';
 
 export const router = Router();
 
-router.get('/', (_req, res) => res.send(`<a href="/auth/google">Connect Gmail</a>`));
+router.get('/', async (req, res) => {
+  const tokens = (req.session as any).googleTokens;
+  if (tokens && tokens.access_token) {
+    // ✅ Already authorized: go straight to dashboard
+    return res.redirect('/dashboard');
+  }
+  // ❌ Not authorized yet: show connect link
+  res.send(`<a href="/auth/google">Connect Gmail</a>`);
+});
 
 router.get('/dashboard', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
