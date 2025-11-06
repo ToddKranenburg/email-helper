@@ -11,7 +11,7 @@ router.get('/', (_req, res) => res.send(`<a href="/auth/google">Connect Gmail</a
 router.get('/dashboard', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
 
-  // Pull summaries with threads, sort newest message first
+  // Pull summaries with threads, then sort newest message first
   const summaries = await prisma.summary.findMany({
     include: { Thread: true }
   });
@@ -30,7 +30,15 @@ router.get('/dashboard', async (req, res) => {
 
 router.post('/ingest', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.status(401).send('auth first');
+
+  // ✅ Clear what’s currently shown so the dashboard reflects only the latest pull
+  await prisma.summary.deleteMany({});
+  // Optional: clear any processing cursor/state if you add it later
+  try { await prisma.processing.deleteMany({}); } catch { /* table may not exist; ignore */ }
+
+  // Fetch fresh Primary inbox and rebuild summaries
   await ingestInbox(req);
+
   res.redirect('/dashboard');
 });
 
