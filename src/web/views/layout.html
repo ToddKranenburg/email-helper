@@ -53,19 +53,28 @@
     </div>
   </div>
 
-    <script>
-    // On ingest submit: show spinner immediately, but leave existing cards visible.
-    document.addEventListener('DOMContentLoaded', function () {
-        const form = document.getElementById('ingest-form');
-        const overlay = document.getElementById('loading');
+<script>
+  // Show spinner on manual ingest submit.
+  document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('ingest-form');
+    const overlay = document.getElementById('loading');
 
-        if (form) {
-        form.addEventListener('submit', function () {
-            if (overlay) overlay.classList.remove('hidden');
-            // Don’t clear cards — keep them visible behind the gray overlay.
-        });
-        }
-    });
-    </script>
+    if (form) {
+      form.addEventListener('submit', function () {
+        if (overlay) overlay.classList.remove('hidden');
+      });
+    }
+
+    // Auto-ingest after first render if server says we're empty (first-time auth)
+    if (window.AUTO_INGEST && form) {
+      // Give the DOM a tick to paint the existing UI, then trigger ingest.
+      requestAnimationFrame(() => {
+        if (overlay) overlay.classList.remove('hidden');
+        form.submit(); // normal POST; server redirects back to /dashboard when done
+      });
+    }
+  });
+</script>
+
 </body>
 </html>

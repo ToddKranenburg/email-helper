@@ -11,7 +11,11 @@ router.get('/', (_req, res) => res.send(`<a href="/auth/google">Connect Gmail</a
 router.get('/dashboard', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
 
-  // Pull summaries with threads, then sort newest message first
+  // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
+  const existingCount = await prisma.summary.count();
+  const autoIngest = existingCount === 0;
+
+  // Pull whatever is there (maybe empty), then sort newest message first
   const summaries = await prisma.summary.findMany({
     include: { Thread: true }
   });
@@ -24,21 +28,23 @@ router.get('/dashboard', async (req, res) => {
 
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
-  const html = layout.replace('<!--CONTENT-->', render(body, sorted));
+
+  // Inject a small flag the client script can read to auto-trigger ingest
+  const withFlag = `${render(body, sorted)}
+  <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
+
+  const html = layout.replace('<!--CONTENT-->', withFlag);
   res.send(html);
 });
 
 router.post('/ingest', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.status(401).send('auth first');
 
-  // ✅ Clear what’s currently shown so the dashboard reflects only the latest pull
+  // Clear current summaries so the dashboard shows only the latest pull
   await prisma.summary.deleteMany({});
-  // Optional: clear any processing cursor/state if you add it later
-  try { await prisma.processing.deleteMany({}); } catch { /* table may not exist; ignore */ }
+  try { await prisma.processing.deleteMany({}); } catch { /* optional table */ }
 
-  // Fetch fresh Primary inbox and rebuild summaries
   await ingestInbox(req);
-
   res.redirect('/dashboard');
 });
 
