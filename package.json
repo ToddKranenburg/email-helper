@@ -1,0 +1,27 @@
+{
+  "name": "email-helper",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "prisma:gen": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0",
+    "cookie-session": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "googleapis": "^132.0.0",
+    "html-to-text": "^9.0.5",
+    "openai": "^4.58.1",
+    "p-limit": "^5.0.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.18.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

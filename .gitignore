@@ -1,0 +1,38 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# Prisma
+prisma/dev.db
+prisma/dev.db-journal
+*.sqlite
+*.db-journal
+
+# Build outputs
+dist/
+build/
+.cache/
+.next/
+out/
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# IDE / editor cruft
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# OS junk
+Thumbs.db

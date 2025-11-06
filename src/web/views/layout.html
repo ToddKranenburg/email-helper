@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Email Helper</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui; margin: 24px; background: #fafafa; }
+    header { display:flex; gap:12px; align-items:center; margin-bottom: 16px; }
+    .btn { padding:8px 12px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer; text-decoration:none; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill,minmax(420px,1fr)); gap:12px; }
+    .card { background:#fff; border:1px solid #eee; border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,0.03); }
+    .subject { font-weight:600; margin-bottom:6px; }
+    .meta { color:#666; font-size:12px; margin-bottom:8px; }
+    .next { color:#333; font-weight:500; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="btn" href="/dashboard">Dashboard</a>
+    <form action="/ingest" method="post"><button class="btn" type="submit">Ingest Inbox (30d)</button></form>
+  </header>
+  <!--CONTENT-->
+</body>
+</html>

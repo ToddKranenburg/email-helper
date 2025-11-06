@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Thread {
+  id             String   @id
+  subject        String?
+  participants   String   // JSON string of addresses
+  lastMessageTs  DateTime
+  historyId      String?
+  updatedAt      DateTime @updatedAt
+  summaries      Summary[]
+}
+
+model Summary {
+  id          String   @id @default(cuid())
+  threadId    String
+  tldr        String
+  category    String
+  nextStep    String
+  confidence  String
+  createdAt   DateTime @default(now())
+  Thread      Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+}
+
+model Processing {
+  threadId           String @id
+  lastProcessedMsgId String
+  updatedAt          DateTime @updatedAt
+}
