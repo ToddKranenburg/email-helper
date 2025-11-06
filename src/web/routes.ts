@@ -27,6 +27,19 @@ router.post('/ingest', async (req, res) => {
   res.redirect('/dashboard');
 });
 
+function emojiForCategory(cat: string): string {
+  const c = (cat || '').toLowerCase();
+  if (c.startsWith('marketing')) return '🏷️';
+  if (c.startsWith('personal event')) return '📅';
+  if (c.startsWith('billing')) return '💳';
+  if (c.startsWith('introduction')) return '🤝';
+  if (c.startsWith('catch up')) return '👋';
+  if (c.startsWith('editorial')) return '📰';
+  if (c.startsWith('personal request')) return '🙏';
+  if (c.startsWith('fyi')) return 'ℹ️';
+  return '📎';
+}
+
 function render(tpl: string, items: any[]) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
@@ -34,11 +47,13 @@ function render(tpl: string, items: any[]) {
     const sender = x.Thread?.fromName || x.Thread?.fromEmail
       ? `${escapeHtml(x.Thread?.fromName || '')}${x.Thread?.fromName && x.Thread?.fromEmail ? ' ' : ''}${x.Thread?.fromEmail ? '&lt;' + escapeHtml(x.Thread.fromEmail) + '&gt;' : ''}`
       : '';
+    const emoji = emojiForCategory(x.category);
 
     return `
     <div class="card">
+      <div class="superhead"><span class="emoji">${emoji}</span><span class="superhead-text">${escapeHtml(x.category)}</span></div>
       <div class="headline">${escapeHtml(x.headline || '')}</div>
-      <div class="meta">${when} • ${escapeHtml(x.category)} • ${formatConfidence(x.confidence)}</div>
+      <div class="meta">${when}</div>
       ${sender ? `<div class="meta"><span class="label">From:</span> ${sender}</div>` : ''}
       <div class="meta"><span class="label">Subject:</span> ${escapeHtml(x.Thread.subject || '(no subject)')}</div>
 
@@ -53,11 +68,4 @@ function render(tpl: string, items: any[]) {
 
 function escapeHtml(s: string) {
   return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
-}
-
-function formatConfidence(conf: string) {
-  const c = (conf || '').toLowerCase().trim();
-  if (c.startsWith('high')) return 'High Confidence';
-  if (c.startsWith('med')) return 'Medium Confidence';
-  return 'Low Confidence';
 }
