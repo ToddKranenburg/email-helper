@@ -34,13 +34,16 @@ function render(tpl: string, items: any[]) {
     const sender = x.Thread?.fromName || x.Thread?.fromEmail
       ? `${escapeHtml(x.Thread?.fromName || '')}${x.Thread?.fromName && x.Thread?.fromEmail ? ' ' : ''}${x.Thread?.fromEmail ? '&lt;' + escapeHtml(x.Thread.fromEmail) + '&gt;' : ''}`
       : '';
+
     return `
     <div class="card">
-      <div class="subject">${escapeHtml(x.Thread.subject || '(no subject)')}</div>
+      <div class="headline">${escapeHtml(x.headline || '')}</div>
       <div class="meta">${when} • ${escapeHtml(x.category)} • ${formatConfidence(x.confidence)}</div>
-      ${sender ? `<div class="meta">From: ${sender}</div>` : ''}
+      ${sender ? `<div class="meta"><span class="label">From:</span> ${sender}</div>` : ''}
+      <div class="meta"><span class="label">Subject:</span> ${escapeHtml(x.Thread.subject || '(no subject)')}</div>
+
       <p>${escapeHtml(x.tldr)}</p>
-      <p class="next">Next: ${escapeHtml(x.nextStep || 'None')}</p>
+      <p class="next"><span class="label">Next:</span> ${escapeHtml(x.nextStep || 'No action')}</p>
       <a href="https://mail.google.com/mail/u/0/#all/${x.threadId}" target="_blank">Open in Gmail</a>
     </div>
   `;
@@ -49,11 +52,11 @@ function render(tpl: string, items: any[]) {
 }
 
 function escapeHtml(s: string) {
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 }
 
 function formatConfidence(conf: string) {
-  const c = (conf || '').toLowerCase();
+  const c = (conf || '').toLowerCase().trim();
   if (c.startsWith('high')) return 'High Confidence';
   if (c.startsWith('med')) return 'Medium Confidence';
   return 'Low Confidence';
