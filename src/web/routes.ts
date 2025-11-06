@@ -10,14 +10,21 @@ router.get('/', (_req, res) => res.send(`<a href="/auth/google">Connect Gmail</a
 
 router.get('/dashboard', async (req, res) => {
   if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
+
+  // Pull summaries with threads, sort newest message first
   const summaries = await prisma.summary.findMany({
-    orderBy: { createdAt: 'desc' },
-    include: { Thread: true },
-    take: 200
+    include: { Thread: true }
   });
+
+  const sorted = summaries.sort((a, b) => {
+    const at = a.Thread?.lastMessageTs ? new Date(a.Thread.lastMessageTs).getTime() : new Date(a.createdAt).getTime();
+    const bt = b.Thread?.lastMessageTs ? new Date(b.Thread.lastMessageTs).getTime() : new Date(b.createdAt).getTime();
+    return bt - at; // descending
+  });
+
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
-  const html = layout.replace('<!--CONTENT-->', render(body, summaries));
+  const html = layout.replace('<!--CONTENT-->', render(body, sorted));
   res.send(html);
 });
 

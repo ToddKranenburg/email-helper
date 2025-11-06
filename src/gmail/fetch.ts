@@ -28,66 +28,73 @@ export async function ingestInbox(req: Request) {
   const limit = pLimit(6);
 
   do {
+    // IMPORTANT: rely on Gmail search "category:primary" to mirror the UI
     const list = await gmail.users.threads.list({
       userId: 'me',
       q: INBOX_QUERY,
       pageToken
+      // NOTE: no labelIds filter here; Gmail's search operator is the source of truth
     });
 
-    const threads = list.data.threads || [];
-    await Promise.all(threads.map(t => limit(async () => {
-      const full = await gmail.users.threads.get({ userId: 'me', id: t.id! });
-      const msgs = (full.data.messages || []).slice(-3);
-      const latest = msgs[msgs.length - 1];
+    const threads = (list.data.threads || []).filter(Boolean);
 
-      const hdrs = latest?.payload?.headers || [];
-      const subject = hdrs.find(h => h.name === 'Subject')?.value || '';
-      const fromRaw = hdrs.find(h => h.name === 'From')?.value;
-      const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
-      const latestMsgId = latest?.id!;
+    await Promise.all(
+      threads.map(t =>
+        limit(async () => {
+          const full = await gmail.users.threads.get({ userId: 'me', id: t.id! });
+          const msgs = (full.data.messages || []).slice(-3);
+          const latest = msgs[msgs.length - 1];
 
-      const participants = Array.from(
-        new Set(
-          hdrs
-            .filter(h => ['From', 'To', 'Cc'].includes(h.name))
-            .flatMap(h => h.value?.split(',') || [])
-            .map(s => s.trim())
-        )
-      );
+          const hdrs = latest?.payload?.headers || [];
+          const subject = hdrs.find(h => h.name === 'Subject')?.value || '';
+          const fromRaw = hdrs.find(h => h.name === 'From')?.value;
+          const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
+          const latestMsgId = latest?.id!;
 
-      await prisma.thread.upsert({
-        where: { id: full.data.id! },
-        update: {
-          subject,
-          participants: JSON.stringify(participants),
-          lastMessageTs: new Date(Number(latest?.internalDate)),
-          historyId: full.data.historyId,
-          fromName,
-          fromEmail
-        },
-        create: {
-          id: full.data.id!,
-          subject,
-          participants: JSON.stringify(participants),
-          lastMessageTs: new Date(Number(latest?.internalDate)),
-          historyId: full.data.historyId,
-          fromName,
-          fromEmail
-        }
-      });
+          const participants = Array.from(
+            new Set(
+              hdrs
+                .filter(h => ['From', 'To', 'Cc'].includes(h.name))
+                .flatMap(h => (h.value?.split(',') || []))
+                .map(s => s.trim())
+            )
+          );
 
-      // Skip if we've already summarized this latest message
-      const existing = await prisma.summary.findUnique({ where: { lastMsgId: latestMsgId } });
-      if (existing) return;
+          await prisma.thread.upsert({
+            where: { id: full.data.id! },
+            update: {
+              subject,
+              participants: JSON.stringify(participants),
+              lastMessageTs: new Date(Number(latest?.internalDate)),
+              historyId: full.data.historyId,
+              fromName,
+              fromEmail
+            },
+            create: {
+              id: full.data.id!,
+              subject,
+              participants: JSON.stringify(participants),
+              lastMessageTs: new Date(Number(latest?.internalDate)),
+              historyId: full.data.historyId,
+              fromName,
+              fromEmail
+            }
+          });
 
-      const convoText = msgs
-        .map(m => normalizeBody(m.payload))
-        .filter(Boolean)
-        .reverse()
-        .join('\n\n---\n\n');
+          // Skip if we've already summarized this latest message
+          const existing = await prisma.summary.findUnique({ where: { lastMsgId: latestMsgId } });
+          if (existing) return;
 
-      await summarizeAndStore(full.data.id!, latestMsgId, subject, participants, convoText);
-    })));
+          const convoText = msgs
+            .map(m => normalizeBody(m.payload))
+            .filter(Boolean)
+            .reverse()
+            .join('\n\n---\n\n');
+
+          await summarizeAndStore(full.data.id!, latestMsgId, subject, participants, convoText);
+        })
+      )
+    );
 
     pageToken = list.data.nextPageToken || undefined;
   } while (pageToken);
@@ -106,7 +113,7 @@ async function summarizeAndStore(
     data: {
       threadId,
       lastMsgId,
-      headline: s.headline || '',
+      headline: (s as any).headline || '',
       tldr: s.tldr,
       category: s.category,
       nextStep: s.next_step,
