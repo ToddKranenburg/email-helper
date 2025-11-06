@@ -3,14 +3,14 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "sqlite" // switch to postgresql on Render later
   url      = "file:./dev.db"
 }
 
 model Thread {
   id             String   @id
   subject        String?
-  participants   String
+  participants   String   // JSON string of addresses
   lastMessageTs  DateTime
   historyId      String?
   fromName       String?
@@ -25,8 +25,9 @@ model Thread {
 model Summary {
   id          String   @id @default(cuid())
   threadId    String
-  // NEW: tie summary to the latest Gmail message ID we processed
   lastMsgId   String   @unique
+  // NEW: very short AI-generated headline for the card
+  headline    String   @default("")
   tldr        String
   category    String
   nextStep    String
