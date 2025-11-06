@@ -31,10 +31,14 @@ function render(tpl: string, items: any[]) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     const when = emailTs.toLocaleString();
+    const sender = x.Thread?.fromName || x.Thread?.fromEmail
+      ? `${escapeHtml(x.Thread?.fromName || '')}${x.Thread?.fromName && x.Thread?.fromEmail ? ' ' : ''}${x.Thread?.fromEmail ? '&lt;' + escapeHtml(x.Thread.fromEmail) + '&gt;' : ''}`
+      : '';
     return `
     <div class="card">
       <div class="subject">${escapeHtml(x.Thread.subject || '(no subject)')}</div>
       <div class="meta">${when} • ${escapeHtml(x.category)} • ${formatConfidence(x.confidence)}</div>
+      ${sender ? `<div class="meta">From: ${sender}</div>` : ''}
       <p>${escapeHtml(x.tldr)}</p>
       <p class="next">Next: ${escapeHtml(x.nextStep || 'None')}</p>
       <a href="https://mail.google.com/mail/u/0/#all/${x.threadId}" target="_blank">Open in Gmail</a>
@@ -49,7 +53,6 @@ function escapeHtml(s: string) {
 }
 
 function formatConfidence(conf: string) {
-  // Temporary; we’ll refine later. Ensures “High Confidence” / “Low Confidence”.
   const c = (conf || '').toLowerCase();
   if (c.startsWith('high')) return 'High Confidence';
   if (c.startsWith('med')) return 'Medium Confidence';

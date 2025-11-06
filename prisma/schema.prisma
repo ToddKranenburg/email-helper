@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "sqlite" // will switch to postgresql on Render later
   url      = "file:./dev.db"
 }
 
@@ -13,8 +13,14 @@ model Thread {
   participants   String   // JSON string of addresses
   lastMessageTs  DateTime
   historyId      String?
+  // NEW: last sender info for display
+  fromName       String?
+  fromEmail      String?
+
   updatedAt      DateTime @updatedAt
   summaries      Summary[]
+
+  @@index([lastMessageTs])
 }
 
 model Summary {
