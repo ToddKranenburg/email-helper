@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "restart": "echo \"DELETE FROM Summary;\" | npx prisma db execute --stdin --url \"file:./prisma/dev.db\" && tsx src/server.ts",
-    "build": "npm install --include=dev && tsc && if [ \"$NODE_ENV\" = \"production\" ]; then npm prune --omit=dev; fi",
+    "build": "npm install --include=dev && npx prisma generate && tsc && if [ \"$NODE_ENV\" = \"production\" ]; then npm prune --omit=dev; fi",
     "prestart": "prisma migrate deploy || prisma db push",
     "start": "node dist/server.js",
     "prisma:gen": "prisma generate",
