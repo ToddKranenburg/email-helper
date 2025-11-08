@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 
 export const authRouter = Router();
@@ -14,7 +14,7 @@ const SCOPES = [
   'openid', 'email', 'profile'
 ];
 
-authRouter.get('/google', (req, res) => {
+authRouter.get('/google', (req: Request, res: Response) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
@@ -23,7 +23,7 @@ authRouter.get('/google', (req, res) => {
   res.redirect(url);
 });
 
-authRouter.get('/google/callback', async (req, res) => {
+authRouter.get('/google/callback', async (req: Request, res: Response) => {
   const { code } = req.query as { code: string };
   const { tokens } = await oauth2Client.getToken(code);
   (req.session as any).googleTokens = tokens;

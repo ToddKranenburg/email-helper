@@ -4,8 +4,10 @@ import { normalizeBody } from './normalize.js';
 import { getAuthedClient } from '../auth/google.js';
 import { prisma } from '../store/db.js';
 import type { Request } from 'express';
+import type { gmail_v1 } from 'googleapis';
+import type { GaxiosResponse } from 'gaxios';
 
-function parseFrom(headerValue: string | undefined): { name?: string; email?: string } {
+function parseFrom(headerValue: string | null | undefined): { name?: string; email?: string } {
   if (!headerValue) return {};
   const emailMatch = headerValue.match(/<([^>]+)>/);
   const email = emailMatch ? emailMatch[1].trim() : (/@/.test(headerValue) ? headerValue.trim() : undefined);
@@ -22,41 +24,54 @@ function parseFrom(headerValue: string | undefined): { name?: string; email?: st
 
 export async function ingestInbox(req: Request) {
   const auth = getAuthedClient(req.session);
-  const gmail = gmailClient(auth);
+  const gmail: gmail_v1.Gmail = gmailClient(auth);
 
   let pageToken: string | undefined = undefined;
   const limit = pLimit(6);
 
   do {
     // IMPORTANT: rely on Gmail search "category:primary" to mirror the UI
-    const list = await gmail.users.threads.list({
+    const list: GaxiosResponse<gmail_v1.Schema$ListThreadsResponse> = await gmail.users.threads.list({
       userId: 'me',
       q: INBOX_QUERY,
       pageToken
       // NOTE: no labelIds filter here; Gmail's search operator is the source of truth
     });
 
-    const threads = (list.data.threads || []).filter(Boolean);
+    const threads: gmail_v1.Schema$Thread[] = (list.data.threads || []).filter(
+      (thread: gmail_v1.Schema$Thread | null | undefined): thread is gmail_v1.Schema$Thread =>
+        Boolean(thread && thread.id)
+    );
 
     await Promise.all(
-      threads.map(t =>
+      threads.map((thread: gmail_v1.Schema$Thread) =>
         limit(async () => {
-          const full = await gmail.users.threads.get({ userId: 'me', id: t.id! });
-          const msgs = (full.data.messages || []).slice(-3);
+          const full = await gmail.users.threads.get({ userId: 'me', id: thread.id! });
+          const msgs = (full.data.messages || [])
+            .filter((msg: gmail_v1.Schema$Message | null | undefined): msg is gmail_v1.Schema$Message => Boolean(msg))
+            .slice(-3);
           const latest = msgs[msgs.length - 1];
+          if (!latest) return;
 
-          const hdrs = latest?.payload?.headers || [];
-          const subject = hdrs.find(h => h.name === 'Subject')?.value || '';
-          const fromRaw = hdrs.find(h => h.name === 'From')?.value;
+          const hdrs = latest.payload?.headers || [];
+          const findHeader = (name: string) =>
+            hdrs.find((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => Boolean(h?.name) && h.name === name);
+          const subject = findHeader('Subject')?.value || '';
+          const fromRaw = findHeader('From')?.value;
           const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
-          const latestMsgId = latest?.id!;
+          const latestMsgId = latest.id;
+          if (!latestMsgId) return;
 
           const participants = Array.from(
             new Set(
               hdrs
-                .filter(h => ['From', 'To', 'Cc'].includes(h.name))
+                .filter((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => {
+                  if (!h?.name) return false;
+                  return ['From', 'To', 'Cc'].includes(h.name);
+                })
                 .flatMap(h => (h.value?.split(',') || []))
                 .map(s => s.trim())
+                .filter(Boolean)
             )
           );
 
@@ -65,7 +80,7 @@ export async function ingestInbox(req: Request) {
             update: {
               subject,
               participants: JSON.stringify(participants),
-              lastMessageTs: new Date(Number(latest?.internalDate)),
+              lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
               historyId: full.data.historyId,
               fromName,
               fromEmail
@@ -74,7 +89,7 @@ export async function ingestInbox(req: Request) {
               id: full.data.id!,
               subject,
               participants: JSON.stringify(participants),
-              lastMessageTs: new Date(Number(latest?.internalDate)),
+              lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
               historyId: full.data.historyId,
               fromName,
               fromEmail

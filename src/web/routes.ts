@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
@@ -6,7 +6,7 @@ import path from 'node:path';
 
 export const router = Router();
 
-router.get('/', async (req, res) => {
+router.get('/', async (req: Request, res: Response) => {
   const tokens = (req.session as any).googleTokens;
   if (tokens && tokens.access_token) {
     // ✅ Already authorized: go straight to dashboard
@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
   res.send(`<a href="/auth/google">Connect Gmail</a>`);
 });
 
-router.get('/dashboard', async (req, res) => {
+router.get('/dashboard', async (req: Request, res: Response) => {
   if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
 
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
@@ -45,7 +45,7 @@ router.get('/dashboard', async (req, res) => {
   res.send(html);
 });
 
-router.post('/ingest', async (req, res) => {
+router.post('/ingest', async (req: Request, res: Response) => {
   if (!(req.session as any).googleTokens) return res.status(401).send('auth first');
 
   // Clear current summaries so the dashboard shows only the latest pull
