@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
+import { buildInboxBrief } from '../llm/morningBrief.js';
+import type { InboxBrief } from '../llm/morningBrief.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -36,9 +38,10 @@ router.get('/dashboard', async (req: Request, res: Response) => {
 
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
+  const brief = await buildInboxBrief(sorted);
 
   // Inject a small flag the client script can read to auto-trigger ingest
-  const withFlag = `${render(body, sorted)}
+  const withFlag = `${render(body, sorted, brief)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -69,7 +72,7 @@ function emojiForCategory(cat: string): string {
   return '📎';
 }
 
-function render(tpl: string, items: any[]) {
+function render(tpl: string, items: any[], brief: InboxBrief) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     const when = emailTs.toLocaleString();
@@ -92,7 +95,23 @@ function render(tpl: string, items: any[]) {
     </div>
   `;
   }).join('\n');
-  return tpl.replace('<!--ROWS-->', rows);
+  const briefHtml = renderBrief(brief);
+  return tpl
+    .replace('<!--BRIEF-->', briefHtml)
+    .replace('<!--ROWS-->', rows);
+}
+
+function renderBrief(brief: InboxBrief) {
+  const bullets = (brief.highlights || []).map(point => `<li>${escapeHtml(point)}</li>`).join('');
+  const list = bullets ? `<ul class="brief-highlights">${bullets}</ul>` : '';
+  return `
+    <div class="card brief-card">
+      <div class="brief-label">Morning Brief</div>
+      <div class="brief-title">${escapeHtml(brief.title)}</div>
+      <p>${escapeHtml(brief.overview)}</p>
+      ${list}
+    </div>
+  `;
 }
 
 function escapeHtml(s: string) {
