@@ -16,6 +16,29 @@
     .brief-title { font-size:20px; font-weight:700; margin-bottom:8px; color:#713f12; }
     .brief-highlights { margin:8px 0 0 18px; padding:0; color:#4b5563; list-style:disc; }
     .brief-highlights li { margin-bottom:6px; }
+    .brief-highlights a.brief-link {
+      color:inherit;
+      text-decoration:none;
+      border-bottom:1px dashed transparent;
+      cursor:pointer;
+      transition:color 0.15s ease, border-color 0.15s ease;
+    }
+    .brief-highlights a.brief-link:hover,
+    .brief-highlights a.brief-link:focus-visible {
+      color:#1d4ed8;
+      border-bottom-color:rgba(59,130,246,0.45);
+      outline:none;
+    }
+    .brief-link-icon {
+      font-size:0.8em;
+      margin-left:4px;
+      opacity:0.45;
+      transition:opacity 0.15s ease;
+    }
+    .brief-highlights a.brief-link:hover .brief-link-icon,
+    .brief-highlights a.brief-link:focus-visible .brief-link-icon {
+      opacity:0.85;
+    }
     .superhead { display:flex; align-items:center; gap:6px; color:#555; font-size:12px; letter-spacing:0.02em; margin-bottom:4px; }
     .emoji { line-height:1; }
     .headline { font-weight:700; font-size:16px; margin-bottom:6px; }

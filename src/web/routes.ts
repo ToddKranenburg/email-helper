@@ -102,7 +102,14 @@ function render(tpl: string, items: any[], brief: InboxBrief) {
 }
 
 function renderBrief(brief: InboxBrief) {
-  const bullets = (brief.highlights || []).map(point => `<li>${escapeHtml(point)}</li>`).join('');
+  const bullets = (brief.highlights || []).map((point, index) => {
+    const threadId = brief.highlightTargets?.[index];
+    if (threadId) {
+      const url = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(threadId)}`;
+      return `<li><a class="brief-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(point)}<span aria-hidden="true" class="brief-link-icon">↗</span></a></li>`;
+    }
+    return `<li>${escapeHtml(point)}</li>`;
+  }).join('');
   const list = bullets ? `<ul class="brief-highlights">${bullets}</ul>` : '';
   return `
     <div class="card brief-card">

@@ -4,6 +4,7 @@ export type InboxBrief = {
   title: string;
   overview: string;
   highlights: string[];
+  highlightTargets: string[];
 };
 
 type SummaryRecord = {
@@ -12,6 +13,7 @@ type SummaryRecord = {
   tldr: string | null;
   nextStep: string | null;
   createdAt: Date;
+  threadId: string;
   Thread?: {
     subject?: string | null;
     fromName?: string | null;
@@ -30,7 +32,7 @@ GOAL: give the user an at-a-glance note covering what needs attention in their i
 OUTPUT STRICT JSON with keys: title, overview, highlights.
 - title: 3-6 word headline (no emojis).
 - overview: 2 short sentences (<=60 words total) summarizing workload & priorities.
-- highlights: array of all actionable reminders for the day, ordered by priority-level / urgency ("Reply to Sam re: contract by noon"). Keep the reminder to < 200 characters for quick skim
+- highlights: array of all actionable reminders for the day, ordered by priority-level / urgency ("Reply to Sam re: contract by noon"). Mention essential information you'd need for context like proper nouns. Keep  reminder to < 150 characters for quick skim -- no need for full sentences
 
 Tone: calm, decisive, proactive. Mention specific categories/people whenever helpful. Look for patterns across multiple emails to synthesize higher-level insights.
 Avoid repeating the same verbs. Focus on what's actionable today.`;
@@ -38,7 +40,8 @@ Avoid repeating the same verbs. Focus on what's actionable today.`;
 const NO_DATA_BRIEF: InboxBrief = {
   title: 'Inbox is clear',
   overview: 'No active summaries yet. Ingest your inbox to generate today\'s briefing.',
-  highlights: []
+  highlights: [],
+  highlightTargets: []
 };
 
 function sanitizeText(value: unknown): string {
@@ -88,14 +91,13 @@ function fallbackBrief(summaries: SummaryRecord[]): InboxBrief {
   const needAction = summaries.filter(hasAction).length;
   const cats = categoryCounts(summaries) || 'FYI: 0';
 
-  const topHighlights = summaries
-    .filter(hasAction)
-    .slice(0, 3)
-    .map(summary => {
-      const subject = sanitizeText(summary.headline || summary.Thread?.subject || 'Inbox item');
-      const next = sanitizeText(summary.nextStep || 'Follow up');
-      return `${subject}: ${next}`;
-    });
+  const actionable = summaries.filter(hasAction);
+  const topHighlights = actionable.map(summary => {
+    const subject = sanitizeText(summary.headline || summary.Thread?.subject || 'Inbox item');
+    const next = sanitizeText(summary.nextStep || 'Follow up');
+    return `${subject}: ${next}`;
+  });
+  const highlightTargets = actionable.map(summary => summary.threadId);
 
   const highlights = topHighlights.length
     ? topHighlights
@@ -104,7 +106,8 @@ function fallbackBrief(summaries: SummaryRecord[]): InboxBrief {
   return {
     title: 'Inbox snapshot',
     overview: `${total} active threads, ${needAction} need attention. Top categories: ${cats}.`,
-    highlights
+    highlights,
+    highlightTargets: topHighlights.length ? highlightTargets : []
   };
 }
 
@@ -121,13 +124,12 @@ function summarizeEntries(summaries: SummaryRecord[]) {
 }
 
 function normalizeHighlights(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(sanitizeText).filter(Boolean).slice(0, 4);
+  if (Array.isArray(value)) return value.map(sanitizeText).filter(Boolean);
   if (typeof value === 'string') {
     return value
       .split(/\n|\||;|•/)
       .map(sanitizeText)
-      .filter(Boolean)
-      .slice(0, 4);
+      .filter(Boolean);
   }
   return [];
 }
@@ -168,13 +170,92 @@ Write the JSON briefing.`;
     const brief: InboxBrief = {
       title: sanitizeText(parsed.title) || fallback.title,
       overview: sanitizeText(parsed.overview) || fallback.overview,
-      highlights: normalizeHighlights(parsed.highlights)
+      highlights: normalizeHighlights(parsed.highlights),
+      highlightTargets: []
     };
 
-    if (!brief.highlights.length) brief.highlights = fallback.highlights;
+    if (!brief.highlights.length) {
+      brief.highlights = fallback.highlights;
+      brief.highlightTargets = fallback.highlightTargets;
+      return brief;
+    }
+
+    const mappedTargets = mapHighlightsToTargets(brief.highlights, summaries);
+    const finalTargets = brief.highlights.map((_, index) => mappedTargets[index] || fallback.highlightTargets[index] || '');
+    brief.highlightTargets = finalTargets;
     return brief;
   } catch (err) {
     console.error('Failed to build inbox brief', err);
     return fallback;
   }
+}
+
+function tokenizeForMatch(text: string): string[] {
+  return sanitizeText(text)
+    .toLowerCase()
+    .match(/[a-z0-9]{3,}/g) ?? [];
+}
+
+function overlapCount(highlightTokens: string[], targetText: string): number {
+  if (!targetText) return 0;
+  const tokens = tokenizeForMatch(targetText);
+  if (!tokens.length || !highlightTokens.length) return 0;
+  const highlightSet = new Set(highlightTokens);
+  return tokens.reduce((acc, token) => acc + (highlightSet.has(token) ? 1 : 0), 0);
+}
+
+function mapHighlightsToTargets(highlights: string[], summaries: SummaryRecord[]): string[] {
+  if (!highlights.length) return [];
+  const actionable = summaries.filter(hasAction);
+  if (!actionable.length) return [];
+
+  const assigned = new Set<string>();
+  return highlights.map(highlight => {
+    const match = findBestSummaryForHighlight(highlight, actionable, assigned);
+    if (match) {
+      assigned.add(match.threadId);
+      return match.threadId;
+    }
+    const fallback = actionable.find(summary => !assigned.has(summary.threadId));
+    if (fallback) {
+      assigned.add(fallback.threadId);
+      return fallback.threadId;
+    }
+    return '';
+  });
+}
+
+function findBestSummaryForHighlight(
+  highlight: string,
+  summaries: SummaryRecord[],
+  used: Set<string>
+): SummaryRecord | null {
+  const tokens = tokenizeForMatch(highlight);
+  if (!tokens.length) return null;
+  const normalized = sanitizeText(highlight).toLowerCase();
+  let best: { summary: SummaryRecord; score: number } | null = null;
+
+  for (const summary of summaries) {
+    if (used.has(summary.threadId)) continue;
+    const subject = sanitizeText(summary.Thread?.subject || summary.headline || '');
+    const next = sanitizeText(summary.nextStep || '');
+    const from = sanitizeText(summary.Thread?.fromName || summary.Thread?.fromEmail || '');
+    const category = titleCaseCategory(summary.category || '');
+    let score = 0;
+
+    if (subject && normalized.includes(subject.toLowerCase())) score += 6;
+    if (next && normalized.includes(next.toLowerCase())) score += 4;
+    if (from && normalized.includes(from.toLowerCase())) score += 3;
+    if (category && normalized.includes(category.toLowerCase())) score += 1;
+
+    score += overlapCount(tokens, subject) * 3;
+    score += overlapCount(tokens, next) * 2;
+    score += overlapCount(tokens, from);
+
+    if (score > 0 && (!best || score > best.score)) {
+      best = { summary, score };
+    }
+  }
+
+  return best?.summary ?? null;
 }
