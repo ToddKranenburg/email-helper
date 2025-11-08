@@ -7,39 +7,65 @@ datasource db {
   url      = "file:./dev.db"
 }
 
+model User {
+  id        String   @id
+  email     String   @unique
+  name      String?
+  picture   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  threads     Thread[]
+  summaries   Summary[]
+  processings Processing[]
+}
+
 model Thread {
-  id             String   @id
-  subject        String?
-  participants   String   // JSON string of addresses
-  lastMessageTs  DateTime
-  historyId      String?
-  fromName       String?
-  fromEmail      String?
+  id            String
+  userId        String
+  subject       String?
+  participants  String   // JSON string of addresses
+  lastMessageTs DateTime
+  historyId     String?
+  fromName      String?
+  fromEmail     String?
 
-  updatedAt      DateTime @updatedAt
-  summaries      Summary[]
+  updatedAt    DateTime     @updatedAt
+  summaries    Summary[]
+  processings  Processing[]
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@id([id, userId])
   @@index([lastMessageTs])
+  @@index([userId])
 }
 
 model Summary {
   id          String   @id @default(cuid())
   threadId    String
-  lastMsgId   String   @unique
-  // NEW: very short AI-generated headline for the card
+  userId      String
+  lastMsgId   String
   headline    String   @default("")
   tldr        String
   category    String
   nextStep    String
   confidence  String
   createdAt   DateTime @default(now())
-  Thread      Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  Thread      Thread   @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([threadId])
+  @@unique([userId, lastMsgId])
+  @@index([threadId, userId])
+  @@index([userId, createdAt])
 }
 
 model Processing {
-  threadId           String @id
+  threadId           String
+  userId             String
   lastProcessedMsgId String
   updatedAt          DateTime @updatedAt
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  Thread             Thread   @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
+
+  @@id([threadId, userId])
 }
