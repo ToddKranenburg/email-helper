@@ -3,22 +3,79 @@
 <head>
   <meta charset="utf-8"/>
   <title>Email Helper</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
   <style>
     body { font-family: ui-sans-serif, system-ui; margin: 24px; background: #fafafa; }
     header { display:flex; gap:12px; align-items:center; margin-bottom: 16px; }
     .btn { padding:8px 12px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer; text-decoration:none; }
     .grid { display:grid; grid-template-columns: repeat(auto-fill,minmax(420px,1fr)); gap:12px; }
     .card { background:#fff; border:1px solid #eee; border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,0.03); }
+    .superhead { display:flex; align-items:center; gap:6px; color:#555; font-size:12px; letter-spacing:0.02em; margin-bottom:4px; }
+    .emoji { line-height:1; }
+    .headline { font-weight:700; font-size:16px; margin-bottom:6px; }
     .subject { font-weight:600; margin-bottom:6px; }
-    .meta { color:#666; font-size:12px; margin-bottom:8px; }
+    .meta { color:#666; font-size:12px; margin:2px 0; }
+    .label { color:#444; font-weight:600; }
     .next { color:#333; font-weight:500; }
+
+    /* Loading overlay */
+    .loading-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(255,255,255,0.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    .hidden { display: none; }
+    .spinner {
+      width: 48px; height: 48px;
+      border: 3px solid #e5e7eb; /* gray-200 */
+      border-top-color: #3b82f6;  /* blue-500 */
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg) } }
+    .loading-text { margin-top: 12px; color:#444; font-size:14px; text-align:center; }
+    .loading-wrap { display:flex; flex-direction:column; align-items:center; }
   </style>
 </head>
 <body>
   <header>
     <a class="btn" href="/dashboard">Dashboard</a>
-    <form action="/ingest" method="post"><button class="btn" type="submit">Ingest Inbox (30d)</button></form>
+    <form id="ingest-form" action="/ingest" method="post"><button class="btn" type="submit">Ingest Inbox (30d)</button></form>
   </header>
+
   <!--CONTENT-->
+
+  <!-- Loading overlay -->
+  <div id="loading" class="loading-backdrop hidden" aria-live="polite" aria-busy="true">
+    <div class="loading-wrap">
+      <div class="spinner" role="status" aria-label="Loading"></div>
+      <div class="loading-text">Fetching latest inbox…</div>
+    </div>
+  </div>
+
+<script>
+  // Show spinner on manual ingest submit.
+  document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('ingest-form');
+    const overlay = document.getElementById('loading');
+
+    if (form) {
+      form.addEventListener('submit', function () {
+        if (overlay) overlay.classList.remove('hidden');
+      });
+    }
+
+    // Auto-ingest after first render if server says we're empty (first-time auth)
+    if (window.AUTO_INGEST && form) {
+      // Give the DOM a tick to paint the existing UI, then trigger ingest.
+      requestAnimationFrame(() => {
+        if (overlay) overlay.classList.remove('hidden');
+        form.submit(); // normal POST; server redirects back to /dashboard when done
+      });
+    }
+  });
+</script>
+
 </body>
 </html>

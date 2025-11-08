@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "sqlite" // switch to postgresql on Render later
   url      = "file:./dev.db"
 }
 
@@ -13,19 +13,29 @@ model Thread {
   participants   String   // JSON string of addresses
   lastMessageTs  DateTime
   historyId      String?
+  fromName       String?
+  fromEmail      String?
+
   updatedAt      DateTime @updatedAt
   summaries      Summary[]
+
+  @@index([lastMessageTs])
 }
 
 model Summary {
   id          String   @id @default(cuid())
   threadId    String
+  lastMsgId   String   @unique
+  // NEW: very short AI-generated headline for the card
+  headline    String   @default("")
   tldr        String
   category    String
   nextStep    String
   confidence  String
   createdAt   DateTime @default(now())
   Thread      Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
 }
 
 model Processing {

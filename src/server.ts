@@ -3,8 +3,12 @@ import express from 'express';
 import session from 'cookie-session';
 import { router as web } from './web/routes.js';
 import { authRouter } from './auth/google.js';
+import path from 'path';
 
 const app = express();
+
+// ✅ Serve static assets like favicon, CSS, images
+app.use(express.static(path.join(process.cwd(), 'src/web/public')));
 
 app.use(session({
   name: 'sess',
