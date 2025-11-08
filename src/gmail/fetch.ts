@@ -23,6 +23,10 @@ function parseFrom(headerValue: string | null | undefined): { name?: string; ema
 }
 
 export async function ingestInbox(req: Request) {
+  const session = req.session as any;
+  const user = session?.user;
+  if (!user?.id) throw new Error('User session missing during ingest');
+
   const auth = getAuthedClient(req.session);
   const gmail: gmail_v1.Gmail = gmailClient(auth);
 
@@ -75,18 +79,23 @@ export async function ingestInbox(req: Request) {
             )
           );
 
+          const threadId = full.data.id!;
+          if (!threadId) return;
+
           await prisma.thread.upsert({
-            where: { id: full.data.id! },
+            where: { id_userId: { id: threadId, userId: user.id } },
             update: {
               subject,
               participants: JSON.stringify(participants),
               lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
               historyId: full.data.historyId,
               fromName,
-              fromEmail
+              fromEmail,
+              userId: user.id
             },
             create: {
-              id: full.data.id!,
+              id: threadId,
+              userId: user.id,
               subject,
               participants: JSON.stringify(participants),
               lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
@@ -97,7 +106,14 @@ export async function ingestInbox(req: Request) {
           });
 
           // Skip if we've already summarized this latest message
-          const existing = await prisma.summary.findUnique({ where: { lastMsgId: latestMsgId } });
+          const existing = await prisma.summary.findUnique({
+            where: {
+              userId_lastMsgId: {
+                userId: user.id,
+                lastMsgId: latestMsgId
+              }
+            }
+          });
           if (existing) return;
 
           const convoText = msgs
@@ -106,7 +122,7 @@ export async function ingestInbox(req: Request) {
             .reverse()
             .join('\n\n---\n\n');
 
-          await summarizeAndStore(full.data.id!, latestMsgId, subject, participants, convoText);
+          await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, user.id);
         })
       )
     );
@@ -121,12 +137,14 @@ async function summarizeAndStore(
   lastMsgId: string,
   subject: string,
   people: string[],
-  convoText: string
+  convoText: string,
+  userId: string
 ) {
   const s = await summarize({ subject, people, convoText });
   await prisma.summary.create({
     data: {
       threadId,
+      userId,
       lastMsgId,
       headline: (s as any).headline || '',
       tldr: s.tldr,

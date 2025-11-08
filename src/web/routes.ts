@@ -9,8 +9,9 @@ import path from 'node:path';
 export const router = Router();
 
 router.get('/', async (req: Request, res: Response) => {
-  const tokens = (req.session as any).googleTokens;
-  if (tokens && tokens.access_token) {
+  const sessionData = req.session as any;
+  const tokens = sessionData.googleTokens;
+  if (tokens?.access_token && sessionData.user?.id) {
     // ✅ Already authorized: go straight to dashboard
     return res.redirect('/dashboard');
   }
@@ -19,14 +20,17 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 router.get('/dashboard', async (req: Request, res: Response) => {
-  if (!(req.session as any).googleTokens) return res.redirect('/auth/google');
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
+  const userId = sessionData.user.id;
 
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
-  const existingCount = await prisma.summary.count();
+  const existingCount = await prisma.summary.count({ where: { userId } });
   const autoIngest = existingCount === 0;
 
   // Pull whatever is there (maybe empty), then sort newest message first
   const summaries = await prisma.summary.findMany({
+    where: { userId },
     include: { Thread: true }
   });
 
@@ -49,11 +53,13 @@ router.get('/dashboard', async (req: Request, res: Response) => {
 });
 
 router.post('/ingest', async (req: Request, res: Response) => {
-  if (!(req.session as any).googleTokens) return res.status(401).send('auth first');
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) return res.status(401).send('auth first');
+  const userId = sessionData.user.id;
 
   // Clear current summaries so the dashboard shows only the latest pull
-  await prisma.summary.deleteMany({});
-  try { await prisma.processing.deleteMany({}); } catch { /* optional table */ }
+  await prisma.summary.deleteMany({ where: { userId } });
+  try { await prisma.processing.deleteMany({ where: { userId } }); } catch { /* optional table */ }
 
   await ingestInbox(req);
   res.redirect('/dashboard');
