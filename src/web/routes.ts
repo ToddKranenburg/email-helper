@@ -295,6 +295,18 @@ function renderSecretaryAssistant(items: any[]) {
     });
   }
 
+  if (chatForm && chatInput) {
+    chatInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey) return;
+      event.preventDefault();
+      if (typeof chatForm.requestSubmit === 'function') {
+        chatForm.requestSubmit();
+      } else {
+        chatForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+  }
+
   function ensureHistory(threadId) {
     if (!chatHistories.has(threadId)) chatHistories.set(threadId, []);
     return chatHistories.get(threadId);
