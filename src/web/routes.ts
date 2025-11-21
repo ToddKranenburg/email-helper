@@ -139,6 +139,7 @@ function emojiForCategory(cat: string): string {
 type SecretaryEmail = {
   threadId: string;
   headline: string;
+  from: string;
   subject: string;
   summary: string;
   nextStep: string;
@@ -149,9 +150,8 @@ function render(tpl: string, items: any[], brief: InboxBrief) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     const when = emailTs.toLocaleString();
-    const sender = x.Thread?.fromName || x.Thread?.fromEmail
-      ? `${escapeHtml(x.Thread?.fromName || '')}${x.Thread?.fromName && x.Thread?.fromEmail ? ' ' : ''}${x.Thread?.fromEmail ? '&lt;' + escapeHtml(x.Thread.fromEmail) + '&gt;' : ''}`
-      : '';
+    const senderText = formatSender(x.Thread);
+    const sender = senderText ? escapeHtml(senderText) : '';
     const emoji = emojiForCategory(x.category);
 
     return `
@@ -200,6 +200,7 @@ function renderSecretaryAssistant(items: any[]) {
   const data: SecretaryEmail[] = items.map(x => ({
     threadId: x.threadId,
     headline: x.headline || '',
+    from: formatSender(x.Thread),
     subject: x.Thread?.subject || '(no subject)',
     summary: x.tldr || '',
     nextStep: x.nextStep || '',
@@ -213,6 +214,7 @@ function renderSecretaryAssistant(items: any[]) {
   const MAX_TURNS = ${MAX_CHAT_TURNS};
   const messageEl = document.getElementById('secretary-message');
   const detailEl = document.getElementById('secretary-email');
+  const fromEl = document.getElementById('secretary-from');
   const summaryEl = document.getElementById('secretary-summary');
   const subjectEl = document.getElementById('secretary-subject');
   const nextEl = document.getElementById('secretary-next');
@@ -411,6 +413,9 @@ function renderSecretaryAssistant(items: any[]) {
         headlineEl.classList.add('hidden');
       }
     }
+    if (fromEl) {
+      fromEl.textContent = current.from || 'Sender unknown';
+    }
     if (subjectEl) subjectEl.textContent = current.subject;
     if (summaryEl) summaryEl.textContent = current.summary || 'No summary captured.';
     if (nextEl) nextEl.textContent = current.nextStep || 'No next step needed.';
@@ -446,6 +451,15 @@ function escapeHtml(s: string) {
 
 function safeJson(value: unknown) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+function formatSender(thread?: { fromName?: string | null; fromEmail?: string | null }) {
+  const name = thread?.fromName ? String(thread.fromName).trim() : '';
+  const email = thread?.fromEmail ? String(thread.fromEmail).trim() : '';
+  if (!name && !email) return '';
+  if (name && email) return `${name} <${email}>`;
+  if (name) return name;
+  return `<${email}>`;
 }
 
 function normalizeHistory(raw: any): ChatTurn[] {
