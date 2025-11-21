@@ -5,6 +5,10 @@ import { buildInboxBrief } from '../llm/morningBrief.js';
 import type { InboxBrief } from '../llm/morningBrief.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
+import { gmailClient } from '../gmail/client.js';
+import { getAuthedClient } from '../auth/google.js';
+import { normalizeBody } from '../gmail/normalize.js';
 
 export const router = Router();
 
@@ -65,6 +69,60 @@ router.post('/ingest', async (req: Request, res: Response) => {
   res.redirect('/dashboard');
 });
 
+router.post('/secretary/chat', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  const question = typeof req.body?.question === 'string' ? req.body.question.trim() : '';
+  const history = normalizeHistory(req.body?.history);
+
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+  if (!question) return res.status(400).json({ error: 'Ask a specific question.' });
+
+  const existingUserTurns = history.filter(turn => turn.role === 'user').length;
+  if (existingUserTurns >= MAX_CHAT_TURNS) {
+    return res.status(429).json({ error: 'Chat limit reached for this thread.' });
+  }
+
+  const summary = await prisma.summary.findFirst({
+    where: { userId: sessionData.user.id, threadId },
+    include: { Thread: true }
+  });
+
+  if (!summary) return res.status(404).json({ error: 'Email summary not found.' });
+
+  let transcript = summary.convoText || '';
+  if (!transcript) {
+    transcript = await fetchTranscript(threadId, req);
+    if (transcript) {
+      await prisma.summary.update({ where: { id: summary.id }, data: { convoText: transcript } });
+    }
+  }
+  if (!transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
+
+  const participants = parseParticipants(summary.Thread?.participants);
+
+  try {
+    const reply = await chatAboutEmail({
+      subject: summary.Thread?.subject || '',
+      headline: summary.headline,
+      tldr: summary.tldr,
+      nextStep: summary.nextStep,
+      participants,
+      transcript,
+      history,
+      question
+    });
+    res.json({ reply });
+  } catch (err) {
+    console.error('secretary chat failed', err);
+    res.status(500).json({ error: 'Unable to chat about this email right now. Please try again.' });
+  }
+});
+
 function emojiForCategory(cat: string): string {
   const c = (cat || '').toLowerCase();
   if (c.startsWith('marketing')) return '🏷️';
@@ -79,6 +137,7 @@ function emojiForCategory(cat: string): string {
 }
 
 type SecretaryEmail = {
+  threadId: string;
   headline: string;
   subject: string;
   summary: string;
@@ -139,6 +198,7 @@ function renderBrief(brief: InboxBrief) {
 
 function renderSecretaryAssistant(items: any[]) {
   const data: SecretaryEmail[] = items.map(x => ({
+    threadId: x.threadId,
     headline: x.headline || '',
     subject: x.Thread?.subject || '(no subject)',
     summary: x.tldr || '',
@@ -150,6 +210,7 @@ function renderSecretaryAssistant(items: any[]) {
 <script>
 (function () {
   const threads = ${payload};
+  const MAX_TURNS = ${MAX_CHAT_TURNS};
   const messageEl = document.getElementById('secretary-message');
   const detailEl = document.getElementById('secretary-email');
   const summaryEl = document.getElementById('secretary-summary');
@@ -158,6 +219,12 @@ function renderSecretaryAssistant(items: any[]) {
   const headlineEl = document.getElementById('secretary-headline');
   const linkEl = document.getElementById('secretary-link');
   const buttonEl = document.getElementById('secretary-button');
+  const chatContainer = document.getElementById('secretary-chat');
+  const chatLog = document.getElementById('secretary-chat-log');
+  const chatForm = document.getElementById('secretary-chat-form');
+  const chatInput = document.getElementById('secretary-chat-input');
+  const chatHint = document.getElementById('secretary-chat-hint');
+  const chatError = document.getElementById('secretary-chat-error');
   if (!buttonEl || !messageEl) return;
 
   if (!threads.length) {
@@ -168,7 +235,111 @@ function renderSecretaryAssistant(items: any[]) {
   }
 
   let index = -1;
+  let activeThreadId = '';
+  const chatHistories = new Map();
   buttonEl.dataset.state = 'idle';
+
+  if (chatForm) {
+    chatForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!activeThreadId || !chatInput) return;
+      const question = chatInput.value.trim();
+      if (!question) return;
+      const history = ensureHistory(activeThreadId);
+      const asked = history.filter(turn => turn.role === 'user').length;
+      if (asked >= MAX_TURNS) {
+        setChatError('Chat limit reached for this thread.');
+        return;
+      }
+      setChatError('');
+      const pending = { role: 'user', content: question };
+      history.push(pending);
+      renderChat(activeThreadId);
+      chatInput.value = '';
+      chatInput.disabled = true;
+      const submitBtn = chatForm.querySelector('button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
+      try {
+        const historyPayload = history.slice(0, -1);
+        const resp = await fetch('/secretary/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            threadId: activeThreadId,
+            question,
+            history: historyPayload
+          })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          history.pop();
+          renderChat(activeThreadId);
+          setChatError(data?.error || 'Something went wrong. Please try again.');
+          chatInput.value = question;
+          return;
+        }
+        history.push({ role: 'assistant', content: data.reply || 'No response received.' });
+        renderChat(activeThreadId);
+      } catch (err) {
+        history.pop();
+        renderChat(activeThreadId);
+        setChatError('Failed to reach the assistant. Check your connection.');
+        chatInput.value = question;
+      } finally {
+        chatInput.disabled = false;
+        const submitBtn = chatForm.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = false;
+        updateChatHint(activeThreadId);
+      }
+    });
+  }
+
+  function ensureHistory(threadId) {
+    if (!chatHistories.has(threadId)) chatHistories.set(threadId, []);
+    return chatHistories.get(threadId);
+  }
+
+  function renderChat(threadId) {
+    if (!chatLog) return;
+    const history = ensureHistory(threadId);
+    if (!history.length) {
+      chatLog.innerHTML = '<div class="chat-placeholder">Ask for more details or clarifications about this thread.</div>';
+      updateChatHint(threadId);
+      return;
+    }
+    chatLog.innerHTML = history.map(turn => {
+      return '<div class="chat-row chat-' + turn.role + '"><div class="chat-bubble">' + htmlEscape(turn.content) + '</div></div>';
+    }).join('');
+    chatLog.scrollTop = chatLog.scrollHeight;
+    updateChatHint(threadId);
+  }
+
+  function updateChatHint(threadId) {
+    if (!chatHint) return;
+    const history = ensureHistory(threadId);
+    const asked = history.filter(turn => turn.role === 'user').length;
+    const remaining = Math.max(0, MAX_TURNS - asked);
+    chatHint.textContent = remaining
+      ? remaining + ' question' + (remaining === 1 ? '' : 's') + ' remaining in this chat.'
+      : 'Chat limit reached. Wrap up this thread to move on.';
+  }
+
+  function setChatError(message) {
+    if (!chatError) return;
+    if (message) {
+      chatError.textContent = message;
+      chatError.classList.remove('hidden');
+    } else {
+      chatError.textContent = '';
+      chatError.classList.add('hidden');
+    }
+  }
+
+  function htmlEscape(value) {
+    const div = document.createElement('div');
+    div.textContent = value || '';
+    return div.innerHTML;
+  }
 
   buttonEl.addEventListener('click', () => {
     const state = buttonEl.dataset.state;
@@ -193,6 +364,11 @@ function renderSecretaryAssistant(items: any[]) {
     const current = threads[index];
     if (!current) return;
     if (detailEl) detailEl.classList.remove('hidden');
+    if (chatContainer) chatContainer.classList.remove('hidden');
+    activeThreadId = current.threadId;
+    ensureHistory(activeThreadId);
+    renderChat(activeThreadId);
+    setChatError('');
 
     if (headlineEl) {
       if (current.headline) {
@@ -238,4 +414,48 @@ function escapeHtml(s: string) {
 
 function safeJson(value: unknown) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+function normalizeHistory(raw: any): ChatTurn[] {
+  if (!Array.isArray(raw)) return [];
+  const entries: ChatTurn[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const role = item.role === 'assistant' ? 'assistant' : item.role === 'user' ? 'user' : null;
+    if (!role || typeof item.content !== 'string') continue;
+    const content = item.content.trim();
+    if (!content) continue;
+    entries.push({ role, content });
+  }
+  return entries.slice(-MAX_CHAT_TURNS * 2);
+}
+
+async function fetchTranscript(threadId: string, req: Request) {
+  try {
+    const auth = getAuthedClient((req as any).session);
+    const gmail = gmailClient(auth);
+    const thread = await gmail.users.threads.get({ userId: 'me', id: threadId });
+    const messages = (thread.data.messages || []).slice(-3);
+    return messages
+      .map(msg => normalizeBody(msg.payload))
+      .filter(Boolean)
+      .reverse()
+      .join('\\n\\n---\\n\\n');
+  } catch (err) {
+    console.error('Failed to fetch Gmail transcript', err);
+    return '';
+  }
+}
+
+function parseParticipants(raw?: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map(value => String(value || '').trim()).filter(Boolean);
+    }
+  } catch {
+    // ignore
+  }
+  return [];
 }

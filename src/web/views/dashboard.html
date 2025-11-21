@@ -8,6 +8,18 @@
       <p><span class="label">Summary:</span> <span id="secretary-summary"></span></p>
       <p><span class="label">Next:</span> <span id="secretary-next"></span></p>
       <a id="secretary-link" class="secretary-link" target="_blank" rel="noreferrer">Open in Gmail ↗</a>
+      <div class="secretary-chat hidden" id="secretary-chat">
+        <div class="secretary-chat-log" id="secretary-chat-log" aria-live="polite"></div>
+        <form id="secretary-chat-form" class="secretary-chat-form">
+          <label class="sr-only" for="secretary-chat-input">Ask a question about this email</label>
+          <textarea id="secretary-chat-input" placeholder="Ask for more detail, context, or suggested replies…" rows="3"></textarea>
+          <div class="secretary-chat-actions">
+            <button class="secretary-btn secretary-chat-btn" type="submit">Send</button>
+            <span class="secretary-chat-limit" id="secretary-chat-hint">Ask up to 20 questions per thread.</span>
+          </div>
+          <p class="secretary-chat-error hidden" id="secretary-chat-error"></p>
+        </form>
+      </div>
     </div>
     <button class="secretary-btn" id="secretary-button" type="button">Start chat</button>
   </div>

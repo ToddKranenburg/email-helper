@@ -150,6 +150,7 @@ async function summarizeAndStore(
       tldr: s.tldr,
       category: s.category,
       nextStep: s.next_step,
+      convoText,
       confidence: s.confidence
     }
   });

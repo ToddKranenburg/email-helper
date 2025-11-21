@@ -59,6 +59,22 @@
     .secretary-btn { padding:8px 14px; border:none; border-radius:20px; background:#4338ca; color:#fff; font-weight:600; cursor:pointer; transition:opacity 0.15s ease, transform 0.15s ease; }
     .secretary-btn[disabled] { cursor:not-allowed; opacity:0.6; }
     .secretary-btn:not([disabled]):active { transform:translateY(1px); }
+    .secretary-chat { margin-top:12px; border-top:1px solid #c7d2fe; padding-top:12px; }
+    .secretary-chat-log { max-height:220px; overflow-y:auto; background:#f5f7ff; border-radius:10px; padding:12px; margin-bottom:12px; display:flex; flex-direction:column; gap:8px; }
+    .chat-row { display:flex; }
+    .chat-row.chat-user { justify-content:flex-end; }
+    .chat-row.chat-assistant { justify-content:flex-start; }
+    .chat-bubble { padding:8px 12px; border-radius:14px; font-size:14px; line-height:1.4; }
+    .chat-user .chat-bubble { background:#4338ca; color:#fff; border-bottom-right-radius:4px; }
+    .chat-assistant .chat-bubble { background:#fff; border:1px solid #d4dcff; color:#1f2937; border-bottom-left-radius:4px; }
+    .chat-placeholder { font-size:13px; color:#6b7280; }
+    .secretary-chat-form textarea { width:100%; border:1px solid #c7d2fe; border-radius:10px; padding:10px; font-family:inherit; resize:vertical; min-height:72px; }
+    .secretary-chat-form textarea:focus { outline:2px solid #4338ca; outline-offset:2px; }
+    .secretary-chat-actions { margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .secretary-chat-btn { flex-shrink:0; }
+    .secretary-chat-limit { font-size:12px; color:#4c1d95; }
+    .secretary-chat-error { font-size:12px; color:#b91c1c; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); border:0; }
 
     /* Loading overlay */
     .loading-backdrop {

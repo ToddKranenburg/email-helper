@@ -49,6 +49,7 @@ model Summary {
   tldr        String
   category    String
   nextStep    String
+  convoText   String   @default("")
   confidence  String
   createdAt   DateTime @default(now())
   Thread      Thread   @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
