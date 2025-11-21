@@ -225,6 +225,7 @@ function renderSecretaryAssistant(items: any[]) {
   const chatInput = document.getElementById('secretary-chat-input');
   const chatHint = document.getElementById('secretary-chat-hint');
   const chatError = document.getElementById('secretary-chat-error');
+  const chatPlaceholderHtml = '<div class="chat-placeholder">Ask for more details or clarifications about this thread.</div>';
   if (!buttonEl || !messageEl) return;
 
   if (!threads.length) {
@@ -303,7 +304,7 @@ function renderSecretaryAssistant(items: any[]) {
     if (!chatLog) return;
     const history = ensureHistory(threadId);
     if (!history.length) {
-      chatLog.innerHTML = '<div class="chat-placeholder">Ask for more details or clarifications about this thread.</div>';
+      chatLog.innerHTML = chatPlaceholderHtml;
       updateChatHint(threadId);
       return;
     }
@@ -335,6 +336,23 @@ function renderSecretaryAssistant(items: any[]) {
     }
   }
 
+  function resetThreadView() {
+    activeThreadId = '';
+    if (detailEl) detailEl.classList.add('hidden');
+    if (chatContainer) chatContainer.classList.add('hidden');
+    if (chatLog) chatLog.innerHTML = chatPlaceholderHtml;
+    if (chatInput) {
+      chatInput.value = '';
+      chatInput.disabled = false;
+    }
+    if (chatForm) {
+      const submitBtn = chatForm.querySelector('button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = false;
+    }
+    if (chatHint) chatHint.textContent = 'Ask up to ' + MAX_TURNS + ' questions per thread.';
+    setChatError('');
+  }
+
   function htmlEscape(value) {
     const div = document.createElement('div');
     div.textContent = value || '';
@@ -348,6 +366,8 @@ function renderSecretaryAssistant(items: any[]) {
       buttonEl.dataset.state = 'complete';
       buttonEl.disabled = true;
       messageEl.textContent = 'All caught up—ping me if you want another pass.';
+      chatHistories.clear();
+      resetThreadView();
       return;
     }
     if (index === -1) {
