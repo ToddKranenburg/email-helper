@@ -221,6 +221,7 @@ function renderSecretaryAssistant(items: any[]) {
   const headlineEl = document.getElementById('secretary-headline');
   const linkEl = document.getElementById('secretary-link');
   const buttonEl = document.getElementById('secretary-button');
+  const backButtonEl = document.getElementById('secretary-back-button');
   const chatContainer = document.getElementById('secretary-chat');
   const chatLog = document.getElementById('secretary-chat-log');
   const chatForm = document.getElementById('secretary-chat-form');
@@ -234,6 +235,7 @@ function renderSecretaryAssistant(items: any[]) {
     messageEl.textContent = 'Morning! Inbox is clear—nothing for us to review.';
     buttonEl.disabled = true;
     buttonEl.textContent = 'No emails';
+    if (backButtonEl) backButtonEl.disabled = true;
     return;
   }
 
@@ -241,6 +243,7 @@ function renderSecretaryAssistant(items: any[]) {
   let activeThreadId = '';
   const chatHistories = new Map();
   buttonEl.dataset.state = 'idle';
+  if (backButtonEl) backButtonEl.disabled = true;
 
   if (chatForm) {
     chatForm.addEventListener('submit', async (event) => {
@@ -365,6 +368,8 @@ function renderSecretaryAssistant(items: any[]) {
     }
     if (chatHint) chatHint.textContent = 'Ask up to ' + MAX_TURNS + ' questions per thread.';
     setChatError('');
+    if (backButtonEl) backButtonEl.disabled = true;
+    index = -1;
   }
 
   function htmlEscape(value) {
@@ -379,22 +384,28 @@ function renderSecretaryAssistant(items: any[]) {
     if (state === 'ready-to-close') {
       buttonEl.dataset.state = 'complete';
       buttonEl.disabled = true;
+      if (backButtonEl) backButtonEl.disabled = true;
       messageEl.textContent = 'All caught up—ping me if you want another pass.';
       chatHistories.clear();
       resetThreadView();
       return;
     }
-    if (index === -1) {
-      messageEl.textContent = \`Great, here's email 1 of \${threads.length}.\`;
-    } else {
-      const nextPosition = index + 2;
-      messageEl.textContent = \`Next up, email \${nextPosition} of \${threads.length}.\`;
-    }
-    advance();
+    const targetIndex = index + 1;
+    showThreadAt(targetIndex, 'next');
   });
 
-  function advance() {
-    index += 1;
+  if (backButtonEl) {
+    backButtonEl.addEventListener('click', () => {
+      if (backButtonEl.disabled) return;
+      const previousIndex = index - 1;
+      showThreadAt(previousIndex, 'back');
+    });
+  }
+
+  function showThreadAt(newIndex, direction) {
+    if (typeof newIndex !== 'number') return;
+    if (newIndex < 0 || newIndex >= threads.length) return;
+    index = newIndex;
     const current = threads[index];
     if (!current) return;
     if (detailEl) detailEl.classList.remove('hidden');
@@ -429,17 +440,43 @@ function renderSecretaryAssistant(items: any[]) {
       }
     }
 
+    updateMessageAfterNavigation(direction);
+    updateNavigationButtons();
+  }
+
+  function updateNavigationButtons() {
     if (index === threads.length - 1) {
       buttonEl.textContent = 'Done';
       buttonEl.dataset.state = 'ready-to-close';
-      messageEl.textContent = threads.length === 1
-        ? 'Only one email waiting. Tap Done when you are finished.'
-        : \`Last one—email \${threads.length} of \${threads.length}.\`;
     } else {
       buttonEl.textContent = 'Next email';
       buttonEl.dataset.state = 'chatting';
     }
+    if (backButtonEl) backButtonEl.disabled = index <= 0;
   }
+
+  function updateMessageAfterNavigation(direction) {
+    if (!messageEl) return;
+    if (threads.length === 1) {
+      messageEl.textContent = 'Only one email waiting. Tap Done when you are finished.';
+      return;
+    }
+    const position = index + 1;
+    if (direction === 'back') {
+      messageEl.textContent = 'Back to email ' + position + ' of ' + threads.length + '.';
+      return;
+    }
+    if (position === 1) {
+      messageEl.textContent = "Great, here's email 1 of " + threads.length + '.';
+      return;
+    }
+    if (position === threads.length) {
+      messageEl.textContent = 'Last one—email ' + threads.length + ' of ' + threads.length + '.';
+      return;
+    }
+    messageEl.textContent = 'Reviewing email ' + position + ' of ' + threads.length + '.';
+  }
+
 })();
 </script>
 `;
