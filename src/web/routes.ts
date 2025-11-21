@@ -78,6 +78,14 @@ function emojiForCategory(cat: string): string {
   return '📎';
 }
 
+type SecretaryEmail = {
+  headline: string;
+  subject: string;
+  summary: string;
+  nextStep: string;
+  link: string;
+};
+
 function render(tpl: string, items: any[], brief: InboxBrief) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
@@ -102,9 +110,11 @@ function render(tpl: string, items: any[], brief: InboxBrief) {
   `;
   }).join('\n');
   const briefHtml = renderBrief(brief);
-  return tpl
+  const secretaryScript = renderSecretaryAssistant(items);
+  return `${tpl
     .replace('<!--BRIEF-->', briefHtml)
-    .replace('<!--ROWS-->', rows);
+    .replace('<!--ROWS-->', rows)
+  }\n${secretaryScript}`;
 }
 
 function renderBrief(brief: InboxBrief) {
@@ -127,6 +137,105 @@ function renderBrief(brief: InboxBrief) {
   `;
 }
 
+function renderSecretaryAssistant(items: any[]) {
+  const data: SecretaryEmail[] = items.map(x => ({
+    headline: x.headline || '',
+    subject: x.Thread?.subject || '(no subject)',
+    summary: x.tldr || '',
+    nextStep: x.nextStep || '',
+    link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : ''
+  }));
+  const payload = safeJson(data);
+  return `
+<script>
+(function () {
+  const threads = ${payload};
+  const messageEl = document.getElementById('secretary-message');
+  const detailEl = document.getElementById('secretary-email');
+  const summaryEl = document.getElementById('secretary-summary');
+  const subjectEl = document.getElementById('secretary-subject');
+  const nextEl = document.getElementById('secretary-next');
+  const headlineEl = document.getElementById('secretary-headline');
+  const linkEl = document.getElementById('secretary-link');
+  const buttonEl = document.getElementById('secretary-button');
+  if (!buttonEl || !messageEl) return;
+
+  if (!threads.length) {
+    messageEl.textContent = 'Morning! Inbox is clear—nothing for us to review.';
+    buttonEl.disabled = true;
+    buttonEl.textContent = 'No emails';
+    return;
+  }
+
+  let index = -1;
+  buttonEl.dataset.state = 'idle';
+
+  buttonEl.addEventListener('click', () => {
+    const state = buttonEl.dataset.state;
+    if (state === 'complete') return;
+    if (state === 'ready-to-close') {
+      buttonEl.dataset.state = 'complete';
+      buttonEl.disabled = true;
+      messageEl.textContent = 'All caught up—ping me if you want another pass.';
+      return;
+    }
+    if (index === -1) {
+      messageEl.textContent = \`Great, here's email 1 of \${threads.length}.\`;
+    } else {
+      const nextPosition = index + 2;
+      messageEl.textContent = \`Next up, email \${nextPosition} of \${threads.length}.\`;
+    }
+    advance();
+  });
+
+  function advance() {
+    index += 1;
+    const current = threads[index];
+    if (!current) return;
+    if (detailEl) detailEl.classList.remove('hidden');
+
+    if (headlineEl) {
+      if (current.headline) {
+        headlineEl.textContent = current.headline;
+        headlineEl.classList.remove('hidden');
+      } else {
+        headlineEl.textContent = '';
+        headlineEl.classList.add('hidden');
+      }
+    }
+    if (subjectEl) subjectEl.textContent = current.subject;
+    if (summaryEl) summaryEl.textContent = current.summary || 'No summary captured.';
+    if (nextEl) nextEl.textContent = current.nextStep || 'No next step needed.';
+    if (linkEl) {
+      if (current.link) {
+        linkEl.href = current.link;
+        linkEl.classList.remove('hidden');
+      } else {
+        linkEl.removeAttribute('href');
+        linkEl.classList.add('hidden');
+      }
+    }
+
+    if (index === threads.length - 1) {
+      buttonEl.textContent = 'Done';
+      buttonEl.dataset.state = 'ready-to-close';
+      messageEl.textContent = threads.length === 1
+        ? 'Only one email waiting. Tap Done when you are finished.'
+        : \`Last one—email \${threads.length} of \${threads.length}.\`;
+    } else {
+      buttonEl.textContent = 'Next email';
+      buttonEl.dataset.state = 'chatting';
+    }
+  }
+})();
+</script>
+`;
+}
+
 function escapeHtml(s: string) {
   return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+}
+
+function safeJson(value: unknown) {
+  return JSON.stringify(value).replace(/</g, '\\u003c');
 }
