@@ -242,6 +242,7 @@ function renderSecretaryAssistant(items: any[]) {
   let index = -1;
   let activeThreadId = '';
   const chatHistories = new Map();
+  let chatAdvanceTimer = 0;
   buttonEl.dataset.state = 'idle';
   if (backButtonEl) backButtonEl.disabled = true;
 
@@ -252,6 +253,9 @@ function renderSecretaryAssistant(items: any[]) {
       const question = chatInput.value.trim();
       if (!question) return;
       const history = ensureHistory(activeThreadId);
+      if (handleNextIntent(question, history)) {
+        return;
+      }
       const asked = history.filter(turn => turn.role === 'user').length;
       if (asked >= MAX_TURNS) {
         setChatError('Chat limit reached for this thread.');
@@ -351,6 +355,113 @@ function renderSecretaryAssistant(items: any[]) {
       chatError.textContent = '';
       chatError.classList.add('hidden');
     }
+  }
+
+  function handleNextIntent(question, history) {
+    if (!activeThreadId || !shouldTriggerNextIntent(question)) return false;
+    if (!history || !Array.isArray(history)) return false;
+    setChatError('');
+    history.push({ role: 'user', content: question });
+    renderChat(activeThreadId);
+    if (chatInput) {
+      chatInput.value = '';
+      chatInput.disabled = true;
+    }
+    const submitBtn = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
+    if (submitBtn) submitBtn.disabled = true;
+    const isLastThread = index >= threads.length - 1;
+    const response = isLastThread
+      ? 'That was the final email in your queue. Tap Done when you are ready.'
+      : 'Proceeding to the next email...';
+    history.push({ role: 'assistant', content: response });
+    renderChat(activeThreadId);
+    if (chatAdvanceTimer) window.clearTimeout(chatAdvanceTimer);
+    const delay = isLastThread ? 900 : 700;
+    chatAdvanceTimer = window.setTimeout(() => {
+      chatAdvanceTimer = 0;
+      if (chatInput) chatInput.disabled = false;
+      if (submitBtn) submitBtn.disabled = false;
+      if (!isLastThread) {
+        showThreadAt(index + 1, 'next');
+      }
+    }, delay);
+    return true;
+  }
+
+  function shouldTriggerNextIntent(rawText) {
+    if (!rawText) return false;
+    const normalized = rawText.toLowerCase();
+    const simple = normalized.replace(/[^a-z0-9\\s]/g, ' ').replace(/\\s+/g, ' ').trim();
+    if (!simple) return false;
+    const matchable = simple.replace(/(?: thanks?| thank you)+$/, '').trim() || simple;
+
+    const directPatterns = [
+      /^next( (email|one|thread|message|item|mail))?( please)?$/,
+      /^(?:skip|pass)(?: (?:this|it)(?: one)?)?( please)?$/,
+      /^(?:let s|lets|let us|shall we|we can|can we|could we|please) move on(?: (now|then))?$/,
+      /^(?:onto|on to) the next( (one|email|thread|message|item))?$/,
+      /^time for the next( (one|email|thread|message|item))?$/,
+      /^(?:ready|i m ready|im ready|we re ready|were ready|ok|okay) (?:for|to move on to) (?:the )?next( (email|one|thread|message|item))?( please)?$/,
+      /^(?:all set|done|im done|i m done|we re done|were done) (?:here|with (?:this|it)(?: one| email| thread| message)?)$/,
+      /^that s all (?:for|with) (?:this|it)(?: one| email| thread| message)?$/
+    ];
+    const segments = matchable.split(/[,;]+/).map(part => part.trim()).filter(Boolean);
+    const targets = segments.length ? segments : [matchable];
+    if (targets.some(part => directPatterns.some(pattern => pattern.test(part)))) {
+      return true;
+    }
+
+    if (/\\bnext( (email|one|thread|message|item|mail))? please$/.test(matchable)) {
+      return true;
+    }
+
+    const targetedCombos = [
+      'move on to the next email',
+      'move on to the next one',
+      'move on to the next thread',
+      'move on to the next message',
+      'move onto the next email',
+      'move onto the next one',
+      'move onto the next thread',
+      'go to the next email',
+      'go to the next one',
+      'go to the next thread',
+      'go on to the next email',
+      'go on to the next one',
+      'go on to the next thread',
+      'proceed to the next email',
+      'proceed to the next one',
+      'proceed to the next thread',
+      'show me the next email',
+      'show me the next one',
+      'ready for the next email',
+      'ready for the next one',
+      'ready to move on to the next',
+      'done with this one',
+      'done with this email',
+      'done with this thread',
+      'done with this message',
+      'all set with this one',
+      'all set with this thread',
+      'skip this email',
+      'skip this thread',
+      'skip this one',
+      'pass this email',
+      'pass this thread',
+      'let s move on to the next',
+      'lets move on to the next',
+      'let us move on to the next',
+      'let s move on',
+      'lets move on',
+      'let us move on',
+      'onto the next email',
+      'onto the next one',
+      'on to the next email',
+      'on to the next one',
+      'time for the next email',
+      'time for the next one'
+    ];
+    return targetedCombos.some(text => matchable.includes(text));
   }
 
   function resetThreadView() {
