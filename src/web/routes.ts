@@ -11,6 +11,7 @@ import { getAuthedClient } from '../auth/google.js';
 import { normalizeBody } from '../gmail/normalize.js';
 
 export const router = Router();
+const PAGE_SIZE = 20;
 
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -29,27 +30,41 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const userId = sessionData.user.id;
 
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
-  const existingCount = await prisma.summary.count({ where: { userId } });
-  const autoIngest = existingCount === 0;
+  const totalItems = await prisma.summary.count({ where: { userId } });
+  const autoIngest = totalItems === 0;
 
-  // Pull whatever is there (maybe empty), then sort newest message first
-  const summaries = await prisma.summary.findMany({
+  const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  const currentPage = Number.isFinite(requestedPage) ? Math.min(Math.max(requestedPage, 1), totalPages) : 1;
+  const skip = (currentPage - 1) * PAGE_SIZE;
+
+  const visible = await prisma.summary.findMany({
     where: { userId },
-    include: { Thread: true }
+    include: { Thread: true },
+    orderBy: [
+      { Thread: { lastMessageTs: 'desc' } },
+      { createdAt: 'desc' }
+    ],
+    skip,
+    take: PAGE_SIZE
   });
 
-  const sorted = summaries.sort((a, b) => {
-    const at = a.Thread?.lastMessageTs ? new Date(a.Thread.lastMessageTs).getTime() : new Date(a.createdAt).getTime();
-    const bt = b.Thread?.lastMessageTs ? new Date(b.Thread.lastMessageTs).getTime() : new Date(b.createdAt).getTime();
-    return bt - at; // descending
-  });
+  const pagination = {
+    page: currentPage,
+    totalPages,
+    totalItems,
+    hasPrevious: currentPage > 1,
+    hasNext: currentPage < totalPages,
+    start: totalItems ? skip + 1 : 0,
+    end: totalItems ? skip + visible.length : 0
+  };
 
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
-  const brief = await buildInboxBrief(sorted);
+  const brief = await buildInboxBrief(visible);
 
   // Inject a small flag the client script can read to auto-trigger ingest
-  const withFlag = `${render(body, sorted, brief)}
+  const withFlag = `${render(body, visible, brief, pagination)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -146,7 +161,17 @@ type SecretaryEmail = {
   link: string;
 };
 
-function render(tpl: string, items: any[], brief: InboxBrief) {
+type PaginationState = {
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  start: number;
+  end: number;
+};
+
+function render(tpl: string, items: any[], brief: InboxBrief, pagination: PaginationState) {
   const rows = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     const when = emailTs.toLocaleString();
@@ -169,11 +194,45 @@ function render(tpl: string, items: any[], brief: InboxBrief) {
   `;
   }).join('\n');
   const briefHtml = renderBrief(brief);
+  const paginationHtml = renderPagination(pagination);
   const secretaryScript = renderSecretaryAssistant(items);
   return `${tpl
     .replace('<!--BRIEF-->', briefHtml)
     .replace('<!--ROWS-->', rows)
+    .replace('<!--PAGINATION-->', paginationHtml)
   }\n${secretaryScript}`;
+}
+
+function renderPagination(pagination: PaginationState) {
+  if (!pagination.totalItems) {
+    return '<p class="pagination-status">No email summaries yet. Ingest your inbox to get started.</p>';
+  }
+  const status = `Showing ${pagination.start}&ndash;${pagination.end} of ${pagination.totalItems} email${pagination.totalItems === 1 ? '' : 's'}`;
+  const pageInfo = pagination.totalPages > 1 ? `Page ${pagination.page} of ${pagination.totalPages}` : '';
+  const prevLabel = pagination.page === 2 ? 'Newest' : `Newer ${PAGE_SIZE}`;
+  const nextLabel = `Older ${PAGE_SIZE}`;
+  const prevControl = pagination.hasPrevious
+    ? `<a class="pagination-btn" href="?page=${pagination.page - 1}" rel="prev">${escapeHtml(prevLabel)}</a>`
+    : '<span class="pagination-btn disabled">Newer</span>';
+  const nextControl = pagination.hasNext
+    ? `<a class="pagination-btn" href="?page=${pagination.page + 1}" rel="next">${escapeHtml(nextLabel)}</a>`
+    : '<span class="pagination-btn disabled">Older</span>';
+  const note = pagination.totalPages > 1
+    ? `<p class="pagination-note">Use Newer/Older to browse messages in batches of ${PAGE_SIZE}.</p>`
+    : '';
+  return `
+    <div class="pagination-inner">
+      <div>
+        <div class="pagination-status">${status}</div>
+        ${pageInfo ? `<div class="pagination-page">${pageInfo}</div>` : ''}
+      </div>
+      <div class="pagination-controls">
+        ${prevControl}
+        ${nextControl}
+      </div>
+    </div>
+    ${note}
+  `;
 }
 
 function renderBrief(brief: InboxBrief) {

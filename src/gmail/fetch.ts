@@ -7,6 +7,8 @@ import type { Request } from 'express';
 import type { gmail_v1 } from 'googleapis';
 import type { GaxiosResponse } from 'gaxios';
 
+const THREAD_BATCH_SIZE = 20;
+
 function parseFrom(headerValue: string | null | undefined): { name?: string; email?: string } {
   if (!headerValue) return {};
   const emailMatch = headerValue.match(/<([^>]+)>/);
@@ -38,7 +40,8 @@ export async function ingestInbox(req: Request) {
     const list: GaxiosResponse<gmail_v1.Schema$ListThreadsResponse> = await gmail.users.threads.list({
       userId: 'me',
       q: INBOX_QUERY,
-      pageToken
+      pageToken,
+      maxResults: THREAD_BATCH_SIZE
       // NOTE: no labelIds filter here; Gmail's search operator is the source of truth
     });
 
