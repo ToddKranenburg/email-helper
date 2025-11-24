@@ -3,6 +3,7 @@ import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
 import { buildInboxBrief } from '../llm/morningBrief.js';
 import type { InboxBrief } from '../llm/morningBrief.js';
+import { generateChatPrimers, type ChatPrimerInput } from '../llm/chatPrimer.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
@@ -63,9 +64,22 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   const brief = await buildInboxBrief(visible);
+  const primerInputs: ChatPrimerInput[] = visible.map(item => ({
+    threadId: item.threadId,
+    subject: item.Thread?.subject || '',
+    summary: item.tldr || '',
+    nextStep: item.nextStep || '',
+    headline: item.headline || '',
+    fromLine: formatSender(item.Thread)
+  }));
+  const primers = await generateChatPrimers(primerInputs);
+  const decorated = visible.map(item => ({
+    ...item,
+    chatPrimer: primers[item.threadId] || ''
+  }));
 
   // Inject a small flag the client script can read to auto-trigger ingest
-  const withFlag = `${render(body, visible, brief, pagination)}
+  const withFlag = `${render(body, decorated, brief, pagination)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -161,6 +175,7 @@ type SecretaryEmail = {
   summary: string;
   nextStep: string;
   link: string;
+  primer: string;
 };
 
 type PaginationState = {
@@ -265,7 +280,8 @@ function renderSecretaryAssistant(items: any[]) {
     subject: x.Thread?.subject || '(no subject)',
     summary: x.tldr || '',
     nextStep: x.nextStep || '',
-    link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : ''
+    link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : '',
+    primer: x.chatPrimer || ''
   }));
   const payload = safeJson(data);
   return `
@@ -289,7 +305,6 @@ function renderSecretaryAssistant(items: any[]) {
   const chatInput = document.getElementById('secretary-chat-input');
   const chatHint = document.getElementById('secretary-chat-hint');
   const chatError = document.getElementById('secretary-chat-error');
-  const chatPlaceholderHtml = '<div class="chat-placeholder">Ask for more details or clarifications about this thread.</div>';
   if (!buttonEl || !messageEl) return;
 
   if (!threads.length) {
@@ -380,6 +395,23 @@ function renderSecretaryAssistant(items: any[]) {
   function ensureHistory(threadId) {
     if (!chatHistories.has(threadId)) chatHistories.set(threadId, []);
     return chatHistories.get(threadId);
+  }
+
+  function ensureIntroPrompt(thread) {
+    if (!thread || !thread.threadId) return ensureHistory(activeThreadId || '');
+    const history = ensureHistory(thread.threadId);
+    if (history.length) return history;
+    const intro = (thread.primer || '').trim() || buildFallbackPrimer(thread);
+    history.push({ role: 'assistant', content: intro });
+    return history;
+  }
+
+  function buildFallbackPrimer(thread) {
+    const subject = thread?.subject ? '**' + thread.subject + '**' : 'this thread';
+    const nextText = thread?.nextStep && thread.nextStep.toLowerCase() !== 'no action'
+      ? 'Need to move on "' + thread.nextStep + '"?'
+      : 'Want a recap or draft reply?';
+    return 'Need more detail on ' + subject + '? ' + nextText;
   }
 
   function renderChat(threadId) {
@@ -646,10 +678,10 @@ function renderSecretaryAssistant(items: any[]) {
     result = result.replace(/~~([^~]+)~~/g, '<del>$1</del>');
     result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
     result = result.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-    result = result.replace(/(^|[\\s>])\\*([^*\\n]+)\\*(?=[\\s<]|$)/g, function (_, prefix, content) {
+    result = result.replace(/(^|[\\s>])\\*([^*\\n]+)\\*(?=[\\s<.,!?:;]|$)/g, function (_, prefix, content) {
       return prefix + '<em>' + content + '</em>';
     });
-    result = result.replace(/(^|[\\s>])_([^_\\n]+)_(?=[\\s<]|$)/g, function (_, prefix, content) {
+    result = result.replace(/(^|[\\s>])_([^_\\n]+)_(?=[\\s<.,!?:;]|$)/g, function (_, prefix, content) {
       return prefix + '<em>' + content + '</em>';
     });
     return result;
@@ -688,7 +720,7 @@ function renderSecretaryAssistant(items: any[]) {
     if (detailEl) detailEl.classList.remove('hidden');
     if (chatContainer) chatContainer.classList.remove('hidden');
     activeThreadId = current.threadId;
-    ensureHistory(activeThreadId);
+    ensureIntroPrompt(current);
     renderChat(activeThreadId);
     setChatError('');
 
