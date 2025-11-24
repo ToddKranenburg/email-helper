@@ -28,6 +28,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
   const userId = sessionData.user.id;
+  await ensureUserRecord(sessionData);
 
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
   const totalItems = await prisma.summary.count({ where: { userId } });
@@ -75,6 +76,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.status(401).send('auth first');
   const userId = sessionData.user.id;
+  await ensureUserRecord(sessionData);
 
   // Clear current summaries so the dashboard shows only the latest pull
   await prisma.summary.deleteMany({ where: { userId } });
@@ -711,4 +713,23 @@ function parseParticipants(raw?: string | null): string[] {
     // ignore
   }
   return [];
+}
+
+async function ensureUserRecord(sessionData: any) {
+  const user = sessionData?.user;
+  if (!user?.id || !user?.email) return;
+  await prisma.user.upsert({
+    where: { id: user.id },
+    update: {
+      email: user.email,
+      name: user.name ?? undefined,
+      picture: user.picture ?? undefined
+    },
+    create: {
+      id: user.id,
+      email: user.email,
+      name: user.name ?? null,
+      picture: user.picture ?? null
+    }
+  });
 }
