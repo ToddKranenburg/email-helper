@@ -74,9 +74,21 @@
     .chat-row { display:flex; }
     .chat-row.chat-user { justify-content:flex-end; }
     .chat-row.chat-assistant { justify-content:flex-start; }
-    .chat-bubble { padding:8px 12px; border-radius:14px; font-size:14px; line-height:1.4; }
-    .chat-user .chat-bubble { background:#4338ca; color:#fff; border-bottom-right-radius:4px; }
-    .chat-assistant .chat-bubble { background:#fff; border:1px solid #d4dcff; color:#1f2937; border-bottom-left-radius:4px; }
+    .chat-bubble { padding:8px 12px; border-radius:14px; font-size:14px; line-height:1.4; color:#1f2937; }
+    .chat-bubble ul,
+    .chat-bubble ol { margin:0 0 8px 18px; padding-left:18px; }
+    .chat-bubble ul ul,
+    .chat-bubble ul ol,
+    .chat-bubble ol ul,
+    .chat-bubble ol ol { margin-top:4px; }
+    .chat-bubble p,
+    .chat-bubble li,
+    .chat-bubble code,
+    .chat-bubble strong,
+    .chat-bubble em,
+    .chat-bubble a { color:inherit; }
+    .chat-user .chat-bubble { background:#4338ca; color:#f8f9ff; border-bottom-right-radius:4px; }
+    .chat-assistant .chat-bubble { background:#fff; border:1px solid #d4dcff; border-bottom-left-radius:4px; }
     .chat-placeholder { font-size:13px; color:#6b7280; }
     .secretary-chat-form textarea { width:100%; border:1px solid #c7d2fe; border-radius:10px; padding:10px; font-family:inherit; resize:vertical; min-height:72px; }
     .secretary-chat-form textarea:focus { outline:2px solid #4338ca; outline-offset:2px; }

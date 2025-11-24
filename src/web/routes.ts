@@ -391,7 +391,7 @@ function renderSecretaryAssistant(items: any[]) {
       return;
     }
     chatLog.innerHTML = history.map(turn => {
-      return '<div class="chat-row chat-' + turn.role + '"><div class="chat-bubble">' + htmlEscape(turn.content) + '</div></div>';
+      return '<div class="chat-row chat-' + turn.role + '"><div class="chat-bubble">' + renderMarkdown(turn.content) + '</div></div>';
     }).join('');
     chatLog.scrollTop = chatLog.scrollHeight;
     updateChatHint(threadId);
@@ -548,6 +548,111 @@ function renderSecretaryAssistant(items: any[]) {
     const div = document.createElement('div');
     div.textContent = value || '';
     return div.innerHTML;
+  }
+
+  function renderMarkdown(value) {
+    if (!value) return '';
+    const escaped = htmlEscape(value);
+    const lines = escaped.split(/\\r?\\n/);
+    const blocks = [];
+    const listStack = [];
+    let paragraphLines = [];
+
+    function flushParagraph() {
+      if (!paragraphLines.length) return;
+      const text = paragraphLines.join(' ').replace(/\\s+/g, ' ').trim();
+      if (text) blocks.push('<p>' + applyInlineMarkdown(text) + '</p>');
+      paragraphLines = [];
+    }
+
+    function closeLastList() {
+      if (!listStack.length) return;
+      const list = listStack.pop();
+      if (!list) return;
+      const html = '<' + list.type + '>' + list.items.join('') + '</' + list.type + '>';
+      if (listStack.length) {
+        listStack[listStack.length - 1].items.push(html);
+      } else {
+        blocks.push(html);
+      }
+    }
+
+    function closeAllLists() {
+      while (listStack.length) closeLastList();
+    }
+
+    function ensureList(type, indent) {
+      while (listStack.length) {
+        const current = listStack[listStack.length - 1];
+        if (current.indent > indent) {
+          closeLastList();
+          continue;
+        }
+        if (current.indent === indent && current.type !== type) {
+          closeLastList();
+          continue;
+        }
+        break;
+      }
+      const current = listStack[listStack.length - 1];
+      if (!current || current.indent !== indent || current.type !== type) {
+        listStack.push({ type, indent, items: [] });
+      }
+    }
+
+    for (const rawLine of lines) {
+      const indentMatch = rawLine.match(/^\\s*/);
+      const indent = indentMatch ? indentMatch[0].length : 0;
+      const trimmed = rawLine.trim();
+      if (!trimmed) {
+        flushParagraph();
+        closeAllLists();
+        continue;
+      }
+      const unorderedMatch = trimmed.match(/^[-*+]\\s+(.*)$/);
+      if (unorderedMatch) {
+        flushParagraph();
+        ensureList('ul', indent);
+        const current = listStack[listStack.length - 1];
+        current.items.push('<li>' + applyInlineMarkdown(unorderedMatch[1].trim()) + '</li>');
+        continue;
+      }
+      const orderedMatch = trimmed.match(/^(\\d+)\\.\\s+(.*)$/);
+      if (orderedMatch) {
+        flushParagraph();
+        ensureList('ol', indent);
+        const current = listStack[listStack.length - 1];
+        current.items.push('<li>' + applyInlineMarkdown(orderedMatch[2].trim()) + '</li>');
+        continue;
+      }
+      closeAllLists();
+      paragraphLines.push(trimmed);
+    }
+
+    flushParagraph();
+    closeAllLists();
+
+    if (!blocks.length) {
+      return applyInlineMarkdown(escaped).replace(/(?:\\r\\n|\\r|\\n)/g, '<br>');
+    }
+    return blocks.join('');
+  }
+
+  function applyInlineMarkdown(text) {
+    if (!text) return '';
+    let result = text;
+    result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+    result = result.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href=\"$2\" target=\"_blank\" rel=\"noreferrer\">$1</a>');
+    result = result.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    result = result.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    result = result.replace(/(^|[\\s>])\\*([^*\\n]+)\\*(?=[\\s<]|$)/g, function (_, prefix, content) {
+      return prefix + '<em>' + content + '</em>';
+    });
+    result = result.replace(/(^|[\\s>])_([^_\\n]+)_(?=[\\s<]|$)/g, function (_, prefix, content) {
+      return prefix + '<em>' + content + '</em>';
+    });
+    return result;
   }
 
   buttonEl.addEventListener('click', () => {
