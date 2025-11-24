@@ -10,6 +10,7 @@ import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryC
 import { gmailClient } from '../gmail/client.js';
 import { getAuthedClient } from '../auth/google.js';
 import { normalizeBody } from '../gmail/normalize.js';
+import { GaxiosError } from 'gaxios';
 
 export const router = Router();
 const PAGE_SIZE = 20;
@@ -96,8 +97,18 @@ router.post('/ingest', async (req: Request, res: Response) => {
   await prisma.summary.deleteMany({ where: { userId } });
   try { await prisma.processing.deleteMany({ where: { userId } }); } catch { /* optional table */ }
 
-  await ingestInbox(req);
-  res.redirect('/dashboard');
+  try {
+    await ingestInbox(req);
+    res.redirect('/dashboard');
+  } catch (err) {
+    console.error('Inbox ingest failed', err);
+    if (err instanceof GaxiosError && err.response?.status === 403) {
+      return res
+        .status(403)
+        .send('Gmail refused to share inbox data. Please disconnect and reconnect your Google account.');
+    }
+    res.status(500).send('Unable to sync your Gmail inbox right now. Please try again.');
+  }
 });
 
 router.post('/secretary/chat', async (req: Request, res: Response) => {

@@ -14,9 +14,16 @@ function createOAuthClient() {
 
 const sharedClient = createOAuthClient();
 
-const SCOPES = [
+const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
-  'openid', 'email', 'profile'
+  'https://www.googleapis.com/auth/gmail.metadata'
+] as const;
+
+const SCOPES = [
+  ...GMAIL_SCOPES,
+  'openid',
+  'email',
+  'profile'
 ];
 
 authRouter.get('/google', (req: Request, res: Response) => {
@@ -33,6 +40,22 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
   const oauthClient = createOAuthClient();
   const { tokens } = await oauthClient.getToken(code);
   oauthClient.setCredentials(tokens);
+
+  const grantedScopes = Array.isArray(tokens.scope)
+    ? tokens.scope
+    : (typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/).filter(Boolean) : []);
+  const scopeSet = new Set(grantedScopes);
+  const missingScopes = grantedScopes.length ? GMAIL_SCOPES.filter(scope => !scopeSet.has(scope)) : [];
+  if (missingScopes.length) {
+    console.error('User did not grant the required Gmail scopes', {
+      missingScopes,
+      grantedScopes
+    });
+    return res
+      .status(403)
+      .send('Google did not grant Gmail access. Please remove the app from your Google Account permissions and try again.');
+  }
+
   const oauth2 = google.oauth2('v2');
   const { data: profile } = await oauth2.userinfo.get({ auth: oauthClient });
 
