@@ -1,8 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
-import { buildInboxBrief } from '../llm/morningBrief.js';
-import type { InboxBrief } from '../llm/morningBrief.js';
 import { generateChatPrimers, type ChatPrimerInput } from '../llm/chatPrimer.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -56,19 +54,8 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     take: PAGE_SIZE
   });
 
-  const pagination = {
-    page: currentPage,
-    totalPages,
-    totalItems,
-    hasPrevious: currentPage > 1,
-    hasNext: currentPage < totalPages,
-    start: totalItems ? skip + 1 : 0,
-    end: totalItems ? skip + visible.length : 0
-  };
-
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
-  const brief = await buildInboxBrief(visible);
   const primerInputs: ChatPrimerInput[] = visible.map(item => ({
     threadId: item.threadId,
     subject: item.Thread?.subject || '',
@@ -84,7 +71,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   }));
 
   // Inject a small flag the client script can read to auto-trigger ingest
-  const withFlag = `${render(body, decorated, brief, pagination)}
+  const withFlag = `${render(body, decorated, totalItems)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -197,101 +184,12 @@ type SecretaryEmail = {
   convo: string;
 };
 
-type PaginationState = {
-  page: number;
-  totalPages: number;
-  totalItems: number;
-  hasPrevious: boolean;
-  hasNext: boolean;
-  start: number;
-  end: number;
-};
-
-function render(tpl: string, items: any[], brief: InboxBrief, pagination: PaginationState) {
-  const rows = items.map(x => {
-    const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
-    const when = emailTs.toLocaleString();
-    const senderText = formatSender(x.Thread);
-    const sender = senderText ? escapeHtml(senderText) : '';
-    const emoji = emojiForCategory(x.category);
-
-    return `
-    <div class="card">
-      <div class="superhead"><span class="emoji">${emoji}</span><span class="superhead-text">${escapeHtml(x.category)}</span></div>
-      <div class="headline">${escapeHtml(x.headline || '')}</div>
-      <div class="meta">${when}</div>
-      ${sender ? `<div class="meta"><span class="label">From:</span> ${sender}</div>` : ''}
-      <div class="meta"><span class="label">Subject:</span> ${escapeHtml(x.Thread.subject || '(no subject)')}</div>
-
-      <p>${escapeHtml(x.tldr)}</p>
-      <p class="next"><span class="label">Next:</span> ${escapeHtml(x.nextStep || 'No action')}</p>
-      <a href="https://mail.google.com/mail/u/0/#all/${x.threadId}" target="_blank">Open in Gmail</a>
-    </div>
-  `;
-  }).join('\n');
-  const briefHtml = renderBrief(brief);
-  const paginationHtml = renderPagination(pagination);
-  const secretaryScript = renderSecretaryAssistant(items);
-  return `${tpl
-    .replace('<!--BRIEF-->', briefHtml)
-    .replace('<!--ROWS-->', rows)
-    .replace('<!--PAGINATION-->', paginationHtml)
-  }\n${secretaryScript}`;
+function render(tpl: string, items: any[], totalItems: number) {
+  const secretaryScript = renderSecretaryAssistant(items, totalItems);
+  return `${tpl}\n${secretaryScript}`;
 }
 
-function renderPagination(pagination: PaginationState) {
-  if (!pagination.totalItems) {
-    return '<p class="pagination-status">No email summaries yet. Ingest your inbox to get started.</p>';
-  }
-  const status = `Showing ${pagination.start}&ndash;${pagination.end} of ${pagination.totalItems} email${pagination.totalItems === 1 ? '' : 's'}`;
-  const pageInfo = pagination.totalPages > 1 ? `Page ${pagination.page} of ${pagination.totalPages}` : '';
-  const prevLabel = pagination.page === 2 ? 'Newest' : `Newer ${PAGE_SIZE}`;
-  const nextLabel = `Older ${PAGE_SIZE}`;
-  const prevControl = pagination.hasPrevious
-    ? `<a class="pagination-btn" href="?page=${pagination.page - 1}" rel="prev">${escapeHtml(prevLabel)}</a>`
-    : '<span class="pagination-btn disabled">Newer</span>';
-  const nextControl = pagination.hasNext
-    ? `<a class="pagination-btn" href="?page=${pagination.page + 1}" rel="next">${escapeHtml(nextLabel)}</a>`
-    : '<span class="pagination-btn disabled">Older</span>';
-  const note = pagination.totalPages > 1
-    ? `<p class="pagination-note">Use Newer/Older to browse messages in batches of ${PAGE_SIZE}.</p>`
-    : '';
-  return `
-    <div class="pagination-inner">
-      <div>
-        <div class="pagination-status">${status}</div>
-        ${pageInfo ? `<div class="pagination-page">${pageInfo}</div>` : ''}
-      </div>
-      <div class="pagination-controls">
-        ${prevControl}
-        ${nextControl}
-      </div>
-    </div>
-    ${note}
-  `;
-}
-
-function renderBrief(brief: InboxBrief) {
-  const bullets = (brief.highlights || []).map((point, index) => {
-    const threadId = brief.highlightTargets?.[index];
-    if (threadId) {
-      const url = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(threadId)}`;
-      return `<li><a class="brief-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(point)}<span aria-hidden="true" class="brief-link-icon">↗</span></a></li>`;
-    }
-    return `<li>${escapeHtml(point)}</li>`;
-  }).join('');
-  const list = bullets ? `<ul class="brief-highlights">${bullets}</ul>` : '';
-  return `
-    <div class="card brief-card">
-      <div class="brief-label">Morning Brief</div>
-      <div class="brief-title">${escapeHtml(brief.title)}</div>
-      <p>${escapeHtml(brief.overview)}</p>
-      ${list}
-    </div>
-  `;
-}
-
-function renderSecretaryAssistant(items: any[]) {
+function renderSecretaryAssistant(items: any[], totalItems: number) {
   const threads: SecretaryEmail[] = items.map(x => {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     return {
@@ -308,7 +206,7 @@ function renderSecretaryAssistant(items: any[]) {
       convo: x.convoText || ''
     };
   });
-  const payload = safeJson({ threads, maxTurns: MAX_CHAT_TURNS }); // consumed by src/web/public/secretary.js
+  const payload = safeJson({ threads, maxTurns: MAX_CHAT_TURNS, totalItems }); // consumed by src/web/public/secretary.js
   return `
 <script id="secretary-bootstrap">window.SECRETARY_BOOTSTRAP = ${payload};</script>
 <script src="/secretary.js" defer></script>

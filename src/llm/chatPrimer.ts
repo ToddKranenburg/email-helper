@@ -13,20 +13,20 @@ export type ChatPrimerInput = {
   fromLine: string;
 };
 
-const SYSTEM_PROMPT = `You craft proactive opening prompts for an email follow-up assistant.
-Each prompt should help the user ask a focused question about the specific thread.
+const SYSTEM_PROMPT = `You are the texting voice of a hyper-capable Gen Z executive assistant who sounds like a modern, confident secretary.
+Your job: craft the first message the assistant sends after scanning an email thread.
 Rules:
 - Output JSON object: {"primers":[{ "threadId": "...", "prompt": "..." }]}
 - One entry per thread ID provided.
-- <= 30 words per prompt.
-- Mention the most relevant detail (subject, sender, or next action).
-- If a next step exists, point toward it or ask if they want to move forward.
-- Tone: concise, energetic, no pleasantries, end with a question or clear suggestion.`;
+- Start by summarizing what the user just received (sender, org, subject, or summary) so they instantly know the situation.
+- After the context, propose the most logical next step (use NextStep if provided) and end by explicitly confirming if they want you to handle it.
+- Tone: casual-but-professional texting style, crisp, no fillers, always helpful.
+- Keep it punchy while staying descriptive.`;
 
 const FALLBACK_SUGGESTIONS = [
-  'Want to clarify the next action?',
-  'Need help drafting the reply?',
-  'Should we double-check the details?'
+  'Want me to draft a reply and get it queued up?',
+  'Should I send a quick follow-up so this keeps moving?',
+  'Want me to set a reminder so it doesn’t fall through?'
 ];
 
 export async function generateChatPrimers(entries: ChatPrimerInput[]): Promise<Record<string, string>> {
@@ -110,11 +110,14 @@ function parsePrimerResponse(payload: string): { threadId: string; prompt: strin
 }
 
 function fallbackPrimer(entry: ChatPrimerInput): string {
-  const subject = entry.subject ? `**${entry.subject}**` : 'this email';
-  const next = entry.nextStep && entry.nextStep.toLowerCase() !== 'no action'
-    ? `Need to move on "${entry.nextStep}"?`
-    : randomSuggestion();
-  return `Need more detail on ${subject}? ${next}`;
+  const summaryBase = (entry.summary || entry.headline || entry.subject || 'an email that needs your call').trim();
+  const normalizedSummary = summaryBase.replace(/\s+/g, ' ');
+  const sender = entry.fromLine ? entry.fromLine.trim() : '';
+  const context = sender ? `${normalizedSummary} from ${sender}` : normalizedSummary;
+  const hasNextStep = entry.nextStep && entry.nextStep.toLowerCase() !== 'no action';
+  const action = hasNextStep ? entry.nextStep!.trim() : '';
+  const next = hasNextStep ? `Want me to ${action}?` : randomSuggestion();
+  return `Heads up: looks like ${context}. ${next}`;
 }
 
 function randomSuggestion() {
