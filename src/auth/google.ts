@@ -15,16 +15,11 @@ function createOAuthClient() {
 const sharedClient = createOAuthClient();
 
 const GMAIL_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.metadata'
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.send'
 ] as const;
 
-const SCOPES = [
-  ...GMAIL_SCOPES,
-  'openid',
-  'email',
-  'profile'
-];
+const SCOPES = [...GMAIL_SCOPES];
 
 authRouter.get('/google', (req: Request, res: Response) => {
   const url = sharedClient.generateAuthUrl({
@@ -56,19 +51,21 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
       .send('Google did not grant Gmail access. Please remove the app from your Google Account permissions and try again.');
   }
 
-  const oauth2 = google.oauth2('v2');
-  const { data: profile } = await oauth2.userinfo.get({ auth: oauthClient });
-
-  const userId = profile.id || (profile as { sub?: string }).sub;
-  if (!userId || !profile.email) {
-    return res.status(400).send('Unable to retrieve Google profile information.');
+  const gmail = google.gmail({ version: 'v1', auth: oauthClient });
+  const { data: gmailProfile } = await gmail.users.getProfile({ userId: 'me' });
+  const email = gmailProfile.emailAddress;
+  if (!email) {
+    return res.status(400).send('Unable to retrieve Gmail profile information.');
   }
+
+  const existingUser = await prisma.user.findUnique({ where: { email } });
+  const userId = existingUser?.id ?? email;
 
   const userPayload = {
     id: userId,
-    email: profile.email,
-    name: profile.name || null,
-    picture: profile.picture || null
+    email,
+    name: existingUser?.name ?? null,
+    picture: existingUser?.picture ?? null
   };
 
   await prisma.user.upsert({

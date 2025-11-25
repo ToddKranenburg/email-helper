@@ -1,36 +1,98 @@
-<section class="secretary-container">
-  <div class="card secretary-card">
-    <div class="secretary-label">Inbox Secretary</div>
-    <p class="secretary-message" id="secretary-message">Morning! Want me to walk you through your emails?</p>
-    <div class="secretary-email hidden" id="secretary-email">
-      <h4 id="secretary-headline" class="hidden"></h4>
-      <p><span class="label">From:</span> <span id="secretary-from"></span></p>
-      <p><span class="label">Subject:</span> <span id="secretary-subject"></span></p>
-      <p><span class="label">Summary:</span> <span id="secretary-summary"></span></p>
-      <p><span class="label">Next:</span> <span id="secretary-next"></span></p>
-      <a id="secretary-link" class="secretary-link" target="_blank" rel="noreferrer">Open in Gmail ↗</a>
-      <div class="secretary-chat hidden" id="secretary-chat">
-        <div class="secretary-chat-log" id="secretary-chat-log" aria-live="polite"></div>
-        <form id="secretary-chat-form" class="secretary-chat-form">
-          <label class="sr-only" for="secretary-chat-input">Ask a question about this email</label>
-          <textarea id="secretary-chat-input" placeholder="Ask for more detail, context, or suggested replies…" rows="3"></textarea>
-          <div class="secretary-chat-actions">
-            <button class="secretary-btn secretary-chat-btn" type="submit">Send</button>
-            <span class="secretary-chat-limit" id="secretary-chat-hint">Ask up to 20 questions per thread.</span>
+<section class="workspace-shell" aria-label="Inbox overview">
+  <div class="workspace-main">
+    <section class="brief-container">
+      <!--BRIEF-->
+    </section>
+
+    <section class="assistant-workspace" aria-label="Assistant workspace">
+      <div class="assistant-pane hidden" id="secretary-chat">
+        <div class="conversation-header">
+          <div class="conversation-title">
+            <span>Email Assistant</span>
+            <span class="conversation-count" id="assistant-position">0 of 0</span>
           </div>
-          <p class="secretary-chat-error hidden" id="secretary-chat-error"></p>
-        </form>
+          <div class="conversation-controls">
+            <button class="workspace-btn ghost" id="secretary-back-button" type="button" disabled>← Previous</button>
+            <button class="workspace-btn primary" id="secretary-button" type="button">Start review</button>
+          </div>
+        </div>
+        <div class="assistant-chat-scroll">
+          <div class="chat-stream" id="secretary-chat-log" aria-live="polite">
+            <div class="chat-placeholder-card">Ask anything about the selected email and I'll break it down for you.</div>
+          </div>
+        </div>
+        <div class="draft-panel hidden" id="secretary-draft">
+          <div class="draft-panel-header">
+            <span>Draft reply · editable</span>
+            <div class="draft-controls">
+              <button type="button">Regenerate</button>
+              <button type="button">Shorter</button>
+              <button type="button">More formal</button>
+              <button type="button">More casual</button>
+              <button type="button">Copy</button>
+            </div>
+          </div>
+          <textarea class="draft-editor" id="secretary-draft-text" placeholder="Assistant drafts will land here." spellcheck="false"></textarea>
+        </div>
+        <div class="assistant-composer">
+          <form id="secretary-chat-form" class="workspace-input">
+            <label class="sr-only" for="secretary-chat-input">Ask a question about this email</label>
+            <textarea id="secretary-chat-input" placeholder="Type a message…" rows="1"></textarea>
+            <span class="input-shortcut">⌘K to ask anything</span>
+            <button type="submit">Send</button>
+          </form>
+          <div class="input-meta">
+            <span id="secretary-chat-hint">Ask up to 20 questions per thread.</span>
+            <span class="chat-error hidden" id="secretary-chat-error"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="email-context">
+    <div class="context-intro">
+      <p class="secretary-message" id="secretary-message">Morning! Want me to walk you through your emails?</p>
+    </div>
+    <div class="context-stack hidden" id="secretary-email" aria-live="polite">
+      <div class="context-section">
+        <h4>Email metadata</h4>
+        <div class="context-person">
+          <div class="context-avatar" id="secretary-avatar">–</div>
+          <div>
+            <p class="context-from" id="secretary-from">Waiting for a thread…</p>
+            <div class="context-meta" id="secretary-received">Select an email to see details.</div>
+          </div>
+        </div>
+        <div class="context-subject" id="secretary-subject">Subject will appear here</div>
+        <div class="context-chips" id="secretary-chips">
+          <span class="chip hidden" id="secretary-chip-reply">Needs reply</span>
+          <span class="chip" id="secretary-chip-category">Category</span>
+          <span class="chip chip-muted" id="secretary-chip-effort">Effort: Low</span>
+        </div>
+      </div>
+      <div class="context-section">
+        <h4>Email summary</h4>
+        <p id="secretary-summary">Select an email to see the AI summary.</p>
+      </div>
+      <div class="context-section">
+        <h4>Recommended next step</h4>
+        <p id="secretary-next">No recommendation yet.</p>
+      </div>
+      <div class="context-section">
+        <h4>Original email preview</h4>
+        <div class="preview-body collapsed" id="secretary-preview"></div>
+        <div class="preview-actions">
+          <button class="preview-btn" id="secretary-preview-toggle" type="button" disabled>Expand</button>
+          <a id="secretary-link" class="secretary-link hidden" target="_blank" rel="noreferrer">Open in Gmail ↗</a>
+        </div>
+      </div>
+      <div class="context-section hidden" id="assistant-insight">
+        <h4>Assistant insight</h4>
+        <p id="assistant-insight-text"></p>
       </div>
     </div>
-    <div class="secretary-controls">
-      <button class="secretary-btn secretary-btn-secondary" id="secretary-back-button" type="button" disabled>Back</button>
-      <button class="secretary-btn" id="secretary-button" type="button">Start chat</button>
-    </div>
-  </div>
-</section>
-
-<section class="brief-container">
-  <!--BRIEF-->
+  </aside>
 </section>
 
 <div id="grid" class="grid">
