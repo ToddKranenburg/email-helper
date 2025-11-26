@@ -3,6 +3,9 @@
   const threads = Array.isArray(bootstrap.threads) ? bootstrap.threads : [];
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
   const TOTAL_ITEMS = typeof bootstrap.totalItems === 'number' ? bootstrap.totalItems : threads.length;
+  const PRIMER_ENDPOINT = '/secretary/primer';
+  const PRIMER_RETRY_DELAY = 1500;
+  const MAX_PRIMER_POLLS = 8;
   window.SECRETARY_BOOTSTRAP = undefined;
 
   const refs = {
@@ -54,12 +57,26 @@
     headerTotal: TOTAL_ITEMS || threads.length,
     autoAdvanceTimer: 0
   };
+  const primerStatus = new Map();
+  const primerRetryTimers = new Map();
+
+  const markedLib = resolveMarked();
+  const linkify = typeof window.linkifyIt === 'function' ? window.linkifyIt() : null;
+  const sanitizeHtml = typeof window.DOMPurify?.sanitize === 'function'
+    ? (html) => window.DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'rel'] })
+    : (html) => html;
+
+  if (markedLib?.setOptions) {
+    markedLib.setOptions({ breaks: true, mangle: false, headerIds: false });
+  }
 
   threads.forEach((thread, index) => {
     if (!thread || !thread.threadId) return;
+    thread.primer = typeof thread.primer === 'string' ? thread.primer.trim() : '';
     state.lookup.set(thread.threadId, thread);
     state.positions.set(thread.threadId, index);
     state.needs.push(thread.threadId);
+    primerStatus.set(thread.threadId, thread.primer ? 'ready' : 'idle');
   });
 
   init();
@@ -212,6 +229,7 @@
     }
 
     updateEmailCard(thread);
+    ensurePrimerFetch(threadId);
     ensureHistory(threadId);
     setChatError('');
     renderChat(threadId);
@@ -244,12 +262,13 @@
     if (refs.preview && refs.previewToggle) {
       const previewText = (thread.convo || '').trim();
       if (previewText) {
-        refs.preview.textContent = previewText;
+        refs.preview.innerHTML = renderPlainText(previewText, { preserveLineBreaks: true });
         refs.preview.classList.add('hidden');
         refs.previewToggle.disabled = false;
         refs.previewToggle.textContent = 'See email body';
       } else {
-        refs.preview.textContent = 'Email body is unavailable for this message.';
+        const fallbackCopy = 'Email body is unavailable for this message.';
+        refs.preview.innerHTML = renderPlainText(fallbackCopy);
         refs.preview.classList.remove('hidden');
         refs.previewToggle.disabled = true;
         refs.previewToggle.textContent = 'Email body unavailable';
@@ -350,6 +369,18 @@
     const primer = (thread.primer || '').trim();
     if (primer) return primer;
 
+    const status = getPrimerStatus(thread.threadId);
+    if (status === 'loading' || status === 'pending') {
+      return 'Give me a beat while I prep the rundown for this one…';
+    }
+    if (status === 'error') {
+      return buildFallbackPrimer(thread);
+    }
+    return buildFallbackPrimer(thread);
+  }
+
+  function buildFallbackPrimer(thread) {
+    if (!thread) return 'Heads up: you have an email waiting.';
     const sender = thread.from ? thread.from.split('<')[0].trim() || thread.from : '';
     const subject = (thread.subject || '').trim();
     const summary = (thread.summary || thread.headline || '').split('\n')[0]?.trim() || '';
@@ -375,6 +406,97 @@
     return `${starter} ${next}`;
   }
 
+  function ensurePrimerFetch(threadId) {
+    const thread = state.lookup.get(threadId);
+    if (!thread || (thread.primer || '').trim()) return;
+    const status = getPrimerStatus(threadId);
+    if (status === 'loading' || status === 'pending') return;
+    setPrimerStatus(threadId, 'loading');
+    fetchPrimer(threadId, 0);
+  }
+
+  function fetchPrimer(threadId, attempt) {
+    const nextAttempt = typeof attempt === 'number' ? attempt : 0;
+    fetch(`${PRIMER_ENDPOINT}/${encodeURIComponent(threadId)}`, {
+      headers: { 'Accept': 'application/json' }
+    }).then(async resp => {
+      if (resp.status === 202) {
+        if (nextAttempt >= MAX_PRIMER_POLLS) {
+          setPrimerStatus(threadId, 'error');
+          return;
+        }
+        setPrimerStatus(threadId, 'pending');
+        schedulePrimerRetry(threadId, nextAttempt + 1);
+        return;
+      }
+      if (!resp.ok) throw new Error('Unable to load primer');
+      const data = await resp.json().catch(() => ({}));
+      const primer = typeof data?.primer === 'string' ? data.primer.trim() : '';
+      if (!primer) {
+        if (nextAttempt >= MAX_PRIMER_POLLS) {
+          setPrimerStatus(threadId, 'error');
+          return;
+        }
+        setPrimerStatus(threadId, 'pending');
+        schedulePrimerRetry(threadId, nextAttempt + 1);
+        return;
+      }
+      applyPrimerToThread(threadId, primer);
+    }).catch(() => {
+      if (nextAttempt >= MAX_PRIMER_POLLS) {
+        setPrimerStatus(threadId, 'error');
+        return;
+      }
+      setPrimerStatus(threadId, 'pending');
+      schedulePrimerRetry(threadId, nextAttempt + 1);
+    });
+  }
+
+  function schedulePrimerRetry(threadId, attempt) {
+    clearPrimerRetry(threadId);
+    const timer = window.setTimeout(() => fetchPrimer(threadId, attempt), PRIMER_RETRY_DELAY);
+    primerRetryTimers.set(threadId, timer);
+  }
+
+  function clearPrimerRetry(threadId) {
+    if (!primerRetryTimers.has(threadId)) return;
+    window.clearTimeout(primerRetryTimers.get(threadId));
+    primerRetryTimers.delete(threadId);
+  }
+
+  function getPrimerStatus(threadId) {
+    return primerStatus.get(threadId) || 'idle';
+  }
+
+  function setPrimerStatus(threadId, status) {
+    primerStatus.set(threadId, status);
+    const history = state.histories.get(threadId);
+    if (!history || !history.length) return;
+    const thread = state.lookup.get(threadId);
+    if (!thread || (thread.primer || '').trim()) return;
+    if (history[0]?.role === 'assistant') {
+      history[0].content = buildIntroMessage(thread);
+      if (threadId === state.activeId) {
+        renderChat(threadId);
+      }
+    }
+  }
+
+  function applyPrimerToThread(threadId, primer) {
+    clearPrimerRetry(threadId);
+    const thread = state.lookup.get(threadId);
+    if (!thread) return;
+    thread.primer = primer;
+    const history = state.histories.get(threadId);
+    if (history && history.length && history[0]?.role === 'assistant') {
+      history[0].content = primer;
+    }
+    setPrimerStatus(threadId, 'ready');
+    if (threadId === state.activeId) {
+      renderChat(threadId);
+    }
+  }
+
   function renderChat(threadId) {
     if (!refs.chatLog) return;
     const history = ensureHistory(threadId);
@@ -388,9 +510,9 @@
     }
     let markup = history.map(turn => {
       if (turn.role === 'assistant') {
-        return `<div class="chat-message assistant"><div class="chat-card">${renderMarkdown(turn.content)}</div></div>`;
+        return `<div class="chat-message assistant"><div class="chat-card">${renderAssistantMarkdown(turn.content)}</div></div>`;
       }
-      return `<div class="chat-message user"><div class="chat-card">${htmlEscape(turn.content)}</div></div>`;
+      return `<div class="chat-message user"><div class="chat-card">${renderPlainText(turn.content, { preserveLineBreaks: true })}</div></div>`;
     }).join('');
     if (state.typing && threadId === state.activeId) {
       markup += typingIndicatorHtml();
@@ -555,16 +677,127 @@
     return `${current} of ${total}`;
   }
 
+  function renderAssistantMarkdown(value) {
+    const text = value == null ? '' : String(value);
+    if (!text) return '';
+    if (!markedLib) {
+      return renderPlainText(text, { preserveLineBreaks: true });
+    }
+    const prepared = linkifyMarkdownSource(text);
+    const html = markedLib.parse(prepared);
+    return sanitizeHtml(html);
+  }
+
+  function linkifyMarkdownSource(text) {
+    if (!linkify) return text;
+    const matches = linkify.match(text);
+    if (!matches || !matches.length) return text;
+    let result = '';
+    let cursor = 0;
+    for (const match of matches) {
+      const start = match.index ?? 0;
+      const end = match.lastIndex ?? start;
+      if (start < cursor) continue;
+      if (shouldSkipMarkdownAutolink(text, start)) {
+        result += text.slice(cursor, end);
+        cursor = end;
+        continue;
+      }
+      result += text.slice(cursor, start);
+      const target = match.url || match.raw || match.text || '';
+      result += `<${target}>`;
+      cursor = end;
+    }
+    result += text.slice(cursor);
+    return result;
+  }
+
+  function shouldSkipMarkdownAutolink(text, index) {
+    if (index <= 0) return false;
+    const prevChar = text[index - 1];
+    if (prevChar === '<') return true;
+    if (prevChar === '(') {
+      for (let i = index - 2; i >= 0; i--) {
+        const ch = text[i];
+        if (ch === ']') return true;
+        if (!/\s/.test(ch)) break;
+      }
+    }
+    return false;
+  }
+
+  function renderPlainText(value, options = {}) {
+    const text = value == null ? '' : String(value);
+    if (!text) return '';
+    const preserve = Boolean(options.preserveLineBreaks);
+    const html = linkifyPlainString(text, preserve);
+    return sanitizeHtml(html);
+  }
+
+  function linkifyPlainString(text, preserveLineBreaks) {
+    if (!linkify) {
+      return escapeTextSegment(text, preserveLineBreaks);
+    }
+    const matches = linkify.match(text);
+    if (!matches || !matches.length) {
+      return escapeTextSegment(text, preserveLineBreaks);
+    }
+    let html = '';
+    let cursor = 0;
+    for (const match of matches) {
+      const start = match.index ?? 0;
+      const end = match.lastIndex ?? start;
+      if (start < cursor) continue;
+      if (start > cursor) {
+        html += escapeTextSegment(text.slice(cursor, start), preserveLineBreaks);
+      }
+      const href = buildHref(match.url || match.raw || match.text || '');
+      const label = htmlEscape(match.text || match.raw || match.url || '');
+      html += `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      cursor = end;
+    }
+    html += escapeTextSegment(text.slice(cursor), preserveLineBreaks);
+    return html;
+  }
+
+  function escapeTextSegment(segment, preserveLineBreaks) {
+    const escaped = htmlEscape(segment || '');
+    return preserveLineBreaks
+      ? escaped.replace(/(?:\r\n|\r|\n)/g, '<br>')
+      : escaped;
+  }
+
+  function buildHref(value) {
+    const raw = (value || '').trim();
+    if (!raw) return '#';
+    const normalized = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return escapeAttribute(normalized);
+  }
+
   function htmlEscape(value) {
     const div = document.createElement('div');
     div.textContent = value || '';
     return div.innerHTML;
   }
 
-  function renderMarkdown(value) {
-    if (!value) return '';
-    const escaped = htmlEscape(value);
-    return escaped.replace(/(?:\r\n|\r|\n)/g, '<br>');
+  function escapeAttribute(value) {
+    return String(value || '').replace(/[&"'<>]/g, ch => ({
+      '&': '&amp;',
+      '"': '&quot;',
+      "'": '&#39;',
+      '<': '&lt;',
+      '>': '&gt;'
+    }[ch] || ch));
+  }
+
+  function resolveMarked() {
+    if (window.marked && typeof window.marked.marked === 'function') {
+      return window.marked.marked;
+    }
+    if (typeof window.marked === 'function') {
+      return window.marked;
+    }
+    return null;
   }
 
   function typingIndicatorHtml() {

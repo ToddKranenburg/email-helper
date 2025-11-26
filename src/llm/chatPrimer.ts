@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { performance } from 'node:perf_hooks';
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
@@ -29,18 +30,35 @@ const FALLBACK_SUGGESTIONS = [
   'Want me to set a reminder so it doesn’t fall through?'
 ];
 
-export async function generateChatPrimers(entries: ChatPrimerInput[]): Promise<Record<string, string>> {
+type PrimerOptions = {
+  traceId?: string;
+};
+
+export async function generateChatPrimers(
+  entries: ChatPrimerInput[],
+  options: PrimerOptions = {}
+): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
-  if (!entries.length) return result;
+  const log = createPrimerLogger(options.traceId);
+  const totalStart = performance.now();
+  log('start', { count: entries.length, openai: Boolean(openai) });
+  if (!entries.length) {
+    log('no entries supplied');
+    return result;
+  }
   if (!openai) {
+    log('openai not configured, using fallback primers only');
     for (const entry of entries) {
       result[entry.threadId] = fallbackPrimer(entry);
     }
+    log('complete', { durationMs: elapsedMs(totalStart) });
     return result;
   }
 
   const chunks = chunk(entries, 6);
+  let processed = 0;
   for (const batch of chunks) {
+    const chunkStart = performance.now();
     const payload = batch.map(item => {
       return `threadId: ${item.threadId}
 Subject: ${item.subject || '(no subject)'}
@@ -70,7 +88,14 @@ NextStep: ${item.nextStep || 'No action'}`;
           result[entry.threadId] = entry.prompt.trim();
         }
       }
+      processed += batch.length;
+      log('chunk complete', {
+        batchSize: batch.length,
+        processed,
+        durationMs: elapsedMs(chunkStart)
+      });
     } catch (err) {
+      log('chunk failed', { error: (err as Error).message || err });
       console.error('Failed to generate chat primers', err);
     }
   }
@@ -80,6 +105,7 @@ NextStep: ${item.nextStep || 'No action'}`;
       result[entry.threadId] = fallbackPrimer(entry);
     }
   }
+  log('complete', { durationMs: elapsedMs(totalStart) });
   return result;
 }
 
@@ -122,4 +148,19 @@ function fallbackPrimer(entry: ChatPrimerInput): string {
 
 function randomSuggestion() {
   return FALLBACK_SUGGESTIONS[Math.floor(Math.random() * FALLBACK_SUGGESTIONS.length)];
+}
+
+function createPrimerLogger(traceId?: string) {
+  const prefix = traceId ? `[chatPrimer:${traceId}]` : '[chatPrimer]';
+  return (message: string, extra?: Record<string, unknown>) => {
+    if (extra && Object.keys(extra).length) {
+      console.log(`${prefix} ${message}`, extra);
+    } else {
+      console.log(`${prefix} ${message}`);
+    }
+  };
+}
+
+function elapsedMs(start: number) {
+  return Math.round((performance.now() - start) * 10) / 10;
 }

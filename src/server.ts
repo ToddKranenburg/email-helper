@@ -7,6 +7,18 @@ import path from 'path';
 
 const app = express();
 
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const delta = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const formatted = delta.toFixed(1);
+    console.log(
+      `[http] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${formatted}ms`
+    );
+  });
+  next();
+});
+
 // ✅ Serve static assets like favicon, CSS, images
 app.use(express.static(path.join(process.cwd(), 'src/web/public')));
 

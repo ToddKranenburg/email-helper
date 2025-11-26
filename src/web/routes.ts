@@ -9,9 +9,17 @@ import { gmailClient } from '../gmail/client.js';
 import { getAuthedClient } from '../auth/google.js';
 import { normalizeBody } from '../gmail/normalize.js';
 import { GaxiosError } from 'gaxios';
+import { performance } from 'node:perf_hooks';
+import crypto from 'node:crypto';
+import type { Summary, Thread } from '@prisma/client';
 
 export const router = Router();
 const PAGE_SIZE = 20;
+const PRIMER_SYNC_BATCH = 6;
+const primerCache = new Map<string, string>();
+const primerPending = new Map<string, Promise<string>>();
+
+type SummaryWithThread = Summary & { Thread: Thread | null };
 
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -28,10 +36,16 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
   const userId = sessionData.user.id;
+  const traceId = createTraceId();
+  const log = scopedLogger(`dashboard:${traceId}`);
+  const routeStart = performance.now();
+  log('start', { userId });
   await ensureUserRecord(sessionData);
 
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
+  const countStart = performance.now();
   const totalItems = await prisma.summary.count({ where: { userId } });
+  log('summary count complete', { durationMs: elapsedMs(countStart), totalItems });
   const hasSummaries = totalItems > 0;
   if (hasSummaries) {
     sessionData.skipAutoIngest = true;
@@ -43,6 +57,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const currentPage = Number.isFinite(requestedPage) ? Math.min(Math.max(requestedPage, 1), totalPages) : 1;
   const skip = (currentPage - 1) * PAGE_SIZE;
 
+  const listStart = performance.now();
   const visible = await prisma.summary.findMany({
     where: { userId },
     include: { Thread: true },
@@ -52,30 +67,35 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     ],
     skip,
     take: PAGE_SIZE
-  });
+  }) as SummaryWithThread[];
+  log('loaded summaries', { durationMs: elapsedMs(listStart), returned: visible.length, page: currentPage });
 
+  const templateStart = performance.now();
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
-  const primerInputs: ChatPrimerInput[] = visible.map(item => ({
-    threadId: item.threadId,
-    subject: item.Thread?.subject || '',
-    summary: item.tldr || '',
-    nextStep: item.nextStep || '',
-    headline: item.headline || '',
-    fromLine: formatSender(item.Thread)
-  }));
-  const primers = await generateChatPrimers(primerInputs);
+  log('templates read', { durationMs: elapsedMs(templateStart) });
+  const primerInputs = visible.map(buildPrimerInputFromSummary);
+  const initialInputs = primerInputs.slice(0, PRIMER_SYNC_BATCH);
+  const remainingInputs = primerInputs.slice(PRIMER_SYNC_BATCH);
+  const primerStart = performance.now();
+  const primers = await generateChatPrimers(initialInputs, { traceId });
+  cachePrimerResults(userId, primers);
+  log('chat primers ready', { durationMs: elapsedMs(primerStart), count: initialInputs.length });
   const decorated = visible.map(item => ({
     ...item,
-    chatPrimer: primers[item.threadId] || ''
+    chatPrimer: primers[item.threadId] || getCachedPrimer(userId, item.threadId) || ''
   }));
 
   // Inject a small flag the client script can read to auto-trigger ingest
+  const renderStart = performance.now();
   const withFlag = `${render(body, decorated, totalItems)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
+  log('html rendered', { durationMs: elapsedMs(renderStart) });
   res.send(html);
+  log('completed', { durationMs: elapsedMs(routeStart) });
+  queuePrimerPrefetch(userId, remainingInputs, traceId);
 });
 
 router.post('/ingest', async (req: Request, res: Response) => {
@@ -157,6 +177,43 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/secretary/primer/:threadId', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const userId = sessionData.user.id;
+  const rawId = typeof req.params.threadId === 'string' ? req.params.threadId : '';
+  const threadId = rawId.trim();
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+
+  const cached = getCachedPrimer(userId, threadId);
+  if (cached) {
+    return res.json({ primer: cached, status: 'ready' });
+  }
+
+  const pending = primerPending.get(primerCacheKey(userId, threadId));
+  if (pending) {
+    const primer = await pending.catch(() => '');
+    if (primer) return res.json({ primer, status: 'ready' });
+    return res.status(202).json({ primer: '', status: 'pending' });
+  }
+
+  const summary = await prisma.summary.findFirst({
+    where: { userId, threadId },
+    include: { Thread: true }
+  });
+  if (!summary) return res.status(404).json({ error: 'Email summary not found.' });
+
+  const traceId = createTraceId();
+  const input = buildPrimerInputFromSummary(summary as SummaryWithThread);
+  const primer = await fetchPrimerForThread(userId, input, traceId);
+  if (primer) {
+    return res.json({ primer, status: 'ready' });
+  }
+  return res.status(202).json({ primer: '', status: 'pending' });
+});
+
 function emojiForCategory(cat: string): string {
   const c = (cat || '').toLowerCase();
   if (c.startsWith('marketing')) return '🏷️';
@@ -209,6 +266,9 @@ function renderSecretaryAssistant(items: any[], totalItems: number) {
   const payload = safeJson({ threads, maxTurns: MAX_CHAT_TURNS, totalItems }); // consumed by src/web/public/secretary.js
   return `
 <script id="secretary-bootstrap">window.SECRETARY_BOOTSTRAP = ${payload};</script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/linkify-it@5.0.0/dist/linkify-it.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
 <script src="/secretary.js" defer></script>
 `;
 }
@@ -221,7 +281,7 @@ function safeJson(value: unknown) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
-function formatSender(thread?: { fromName?: string | null; fromEmail?: string | null }) {
+function formatSender(thread?: { fromName?: string | null; fromEmail?: string | null } | null) {
   const name = thread?.fromName ? String(thread.fromName).trim() : '';
   const email = thread?.fromEmail ? String(thread.fromEmail).trim() : '';
   if (!name && !email) return '';
@@ -291,4 +351,97 @@ async function ensureUserRecord(sessionData: any) {
       picture: user.picture ?? null
     }
   });
+}
+
+function buildPrimerInputFromSummary(item: SummaryWithThread): ChatPrimerInput {
+  return {
+    threadId: item.threadId,
+    subject: item.Thread?.subject || '',
+    summary: item.tldr || '',
+    nextStep: item.nextStep || '',
+    headline: item.headline || '',
+    fromLine: formatSender(item.Thread)
+  };
+}
+
+function queuePrimerPrefetch(userId: string, inputs: ChatPrimerInput[], traceId: string) {
+  const work = inputs.filter(item => shouldGeneratePrimer(userId, item.threadId));
+  if (!work.length) return;
+  const log = scopedLogger(`primerPrefetch:${traceId}`);
+  log('queueing background primer generation', { count: work.length });
+  const batchPromise = runPrimerBatch(userId, work, traceId);
+  for (const input of work) {
+    const key = primerCacheKey(userId, input.threadId);
+    const perThread = batchPromise
+      .then(result => result[input.threadId] || '')
+      .finally(() => primerPending.delete(key));
+    primerPending.set(key, perThread);
+  }
+}
+
+async function fetchPrimerForThread(userId: string, input: ChatPrimerInput, traceId: string) {
+  const existing = getCachedPrimer(userId, input.threadId);
+  if (existing) return existing;
+  const key = primerCacheKey(userId, input.threadId);
+  if (primerPending.has(key)) {
+    return primerPending.get(key)!;
+  }
+  const batchPromise = runPrimerBatch(userId, [input], traceId);
+  const perThread = batchPromise
+    .then(result => result[input.threadId] || '')
+    .finally(() => primerPending.delete(key));
+  primerPending.set(key, perThread);
+  return perThread;
+}
+
+function runPrimerBatch(userId: string, inputs: ChatPrimerInput[], traceId: string): Promise<Record<string, string>> {
+  const log = scopedLogger(`primerBatch:${traceId}`);
+  return generateChatPrimers(inputs, { traceId }).then(result => {
+    cachePrimerResults(userId, result);
+    return result;
+  }).catch(err => {
+    log('failed to generate primers', { error: (err as Error).message || err });
+    return {} as Record<string, string>;
+  });
+}
+
+function cachePrimerResults(userId: string, primers: Record<string, string>) {
+  for (const [threadId, primer] of Object.entries(primers)) {
+    if (!primer) continue;
+    primerCache.set(primerCacheKey(userId, threadId), primer);
+  }
+}
+
+function getCachedPrimer(userId: string, threadId: string) {
+  return primerCache.get(primerCacheKey(userId, threadId)) || '';
+}
+
+function shouldGeneratePrimer(userId: string, threadId: string) {
+  const key = primerCacheKey(userId, threadId);
+  return threadId && !primerCache.has(key) && !primerPending.has(key);
+}
+
+function primerCacheKey(userId: string, threadId: string) {
+  return `${userId}:${threadId}`;
+}
+
+function scopedLogger(scope: string) {
+  return (message: string, extra?: Record<string, unknown>) => {
+    if (extra && Object.keys(extra).length) {
+      console.log(`[${scope}] ${message}`, extra);
+    } else {
+      console.log(`[${scope}] ${message}`);
+    }
+  };
+}
+
+function elapsedMs(start: number) {
+  return Math.round((performance.now() - start) * 10) / 10;
+}
+
+function createTraceId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
