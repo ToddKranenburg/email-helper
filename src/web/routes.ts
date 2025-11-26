@@ -15,7 +15,6 @@ import type { Summary, Thread } from '@prisma/client';
 
 export const router = Router();
 const PAGE_SIZE = 20;
-const PRIMER_INITIAL_COUNT = 1;
 const PRIMER_BACKGROUND_BATCH = 6;
 const primerCache = new Map<string, string>();
 const primerPending = new Map<string, Promise<string>>();
@@ -76,15 +75,9 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const primerInputs = visible.map(buildPrimerInputFromSummary);
-  const initialInputs = primerInputs.slice(0, PRIMER_INITIAL_COUNT);
-  const remainingInputs = primerInputs.slice(PRIMER_INITIAL_COUNT);
-  const primerStart = performance.now();
-  const primers = await generateChatPrimers(initialInputs, { traceId });
-  cachePrimerResults(userId, primers);
-  log('chat primers ready', { durationMs: elapsedMs(primerStart), count: initialInputs.length });
   const decorated = visible.map(item => ({
     ...item,
-    chatPrimer: primers[item.threadId] || getCachedPrimer(userId, item.threadId) || ''
+    chatPrimer: getCachedPrimer(userId, item.threadId) || ''
   }));
 
   // Inject a small flag the client script can read to auto-trigger ingest
@@ -96,7 +89,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   log('html rendered', { durationMs: elapsedMs(renderStart) });
   res.send(html);
   log('completed', { durationMs: elapsedMs(routeStart) });
-  queuePrimerPrefetch(userId, remainingInputs, traceId);
+  queuePrimerPrefetch(userId, primerInputs, traceId);
 });
 
 router.post('/ingest', async (req: Request, res: Response) => {
