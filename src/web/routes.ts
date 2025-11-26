@@ -15,7 +15,8 @@ import type { Summary, Thread } from '@prisma/client';
 
 export const router = Router();
 const PAGE_SIZE = 20;
-const PRIMER_SYNC_BATCH = 6;
+const PRIMER_INITIAL_COUNT = 1;
+const PRIMER_BACKGROUND_BATCH = 6;
 const primerCache = new Map<string, string>();
 const primerPending = new Map<string, Promise<string>>();
 
@@ -75,8 +76,8 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const primerInputs = visible.map(buildPrimerInputFromSummary);
-  const initialInputs = primerInputs.slice(0, PRIMER_SYNC_BATCH);
-  const remainingInputs = primerInputs.slice(PRIMER_SYNC_BATCH);
+  const initialInputs = primerInputs.slice(0, PRIMER_INITIAL_COUNT);
+  const remainingInputs = primerInputs.slice(PRIMER_INITIAL_COUNT);
   const primerStart = performance.now();
   const primers = await generateChatPrimers(initialInputs, { traceId });
   cachePrimerResults(userId, primers);
@@ -368,15 +369,21 @@ function queuePrimerPrefetch(userId: string, inputs: ChatPrimerInput[], traceId:
   const work = inputs.filter(item => shouldGeneratePrimer(userId, item.threadId));
   if (!work.length) return;
   const log = scopedLogger(`primerPrefetch:${traceId}`);
-  log('queueing background primer generation', { count: work.length });
-  const batchPromise = runPrimerBatch(userId, work, traceId);
-  for (const input of work) {
-    const key = primerCacheKey(userId, input.threadId);
-    const perThread = batchPromise
-      .then(result => result[input.threadId] || '')
-      .finally(() => primerPending.delete(key));
-    primerPending.set(key, perThread);
-  }
+  const batches = chunkArray(work, PRIMER_BACKGROUND_BATCH);
+  log('queueing background primer generation', { count: work.length, batches: batches.length });
+  let chain = Promise.resolve();
+  batches.forEach((batch, index) => {
+    const batchTrace = `${traceId}-bg${index + 1}`;
+    const batchPromise = chain.then(() => runPrimerBatch(userId, batch, batchTrace));
+    for (const input of batch) {
+      const key = primerCacheKey(userId, input.threadId);
+      const perThread = batchPromise
+        .then(result => result[input.threadId] || '')
+        .finally(() => primerPending.delete(key));
+      primerPending.set(key, perThread);
+    }
+    chain = batchPromise.then(() => undefined).catch(() => undefined);
+  });
 }
 
 async function fetchPrimerForThread(userId: string, input: ChatPrimerInput, traceId: string) {
@@ -423,6 +430,15 @@ function shouldGeneratePrimer(userId: string, threadId: string) {
 
 function primerCacheKey(userId: string, threadId: string) {
   return `${userId}:${threadId}`;
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (size <= 0) return [items.slice()];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 function scopedLogger(scope: string) {
