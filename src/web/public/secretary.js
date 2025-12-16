@@ -35,6 +35,7 @@
     chatError: document.getElementById('assistant-error'),
     chatHint: document.getElementById('assistant-hint'),
     doneBtn: document.getElementById('action-done'),
+    archiveBtn: document.getElementById('action-archive'),
     skipBtn: document.getElementById('action-skip'),
     mapToggle: document.getElementById('map-toggle'),
     drawer: document.getElementById('inbox-drawer'),
@@ -123,6 +124,9 @@
     refs.chatInput.addEventListener('keydown', handleChatKeydown);
 
     refs.doneBtn.addEventListener('click', () => markCurrentDone('button'));
+    if (refs.archiveBtn) {
+      refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
+    }
     refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
 
     if (refs.loadMoreHead) {
@@ -698,12 +702,51 @@
   function toggleComposer(enabled) {
     refs.chatInput.disabled = !enabled || !state.activeId;
     refs.doneBtn.disabled = !enabled || !state.activeId;
+    if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
     refs.skipBtn.disabled = !enabled || !state.activeId;
   }
 
   function setAssistantTyping(value) {
     state.typing = Boolean(value);
     renderChat(state.activeId);
+  }
+
+  function withButtonBusy(btn, label) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    if (label) btn.textContent = label;
+    return () => {
+      btn.disabled = false;
+      if (label) btn.textContent = original;
+    };
+  }
+
+  async function archiveCurrent(source) {
+    if (!state.activeId || !refs.archiveBtn) return;
+    const threadId = state.activeId;
+    const restoreBtn = withButtonBusy(refs.archiveBtn, 'Archiving…');
+    toggleComposer(false);
+    setChatError('');
+    try {
+      const resp = await fetch('/api/archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to archive this email.');
+      }
+      markCurrentDone('archive');
+    } catch (err) {
+      console.error('Failed to archive thread', err);
+      const message = err instanceof Error ? err.message : 'Unable to archive this email.';
+      setChatError(message);
+    } finally {
+      restoreBtn();
+      toggleComposer(Boolean(state.activeId));
+    }
   }
 
   function markCurrentDone(source) {

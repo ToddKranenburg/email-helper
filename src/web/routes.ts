@@ -246,6 +246,45 @@ router.get('/api/threads', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/api/archive', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+
+  const summary = await prisma.summary.findFirst({
+    where: { userId: sessionData.user.id, threadId }
+  });
+  if (!summary) return res.status(404).json({ error: 'Email not found in your queue.' });
+
+  const traceId = createTraceId();
+  const log = scopedLogger(`archive:${traceId}`);
+
+  try {
+    const auth = getAuthedClient(sessionData);
+    const gmail = gmailClient(auth);
+    await gmail.users.threads.modify({
+      userId: 'me',
+      id: threadId,
+      requestBody: {
+        removeLabelIds: ['INBOX']
+      }
+    });
+    await prisma.summary.deleteMany({ where: { userId: sessionData.user.id, threadId } });
+    log('archived thread', { threadId, userId: sessionData.user.id });
+    return res.json({ status: 'archived' });
+  } catch (err) {
+    const gaxios = err instanceof GaxiosError ? err : undefined;
+    const reason = gaxios?.response?.status === 403
+      ? 'Google blocked the archive request. Please reconnect Google and try again.'
+      : 'Unable to archive this email right now. Please try again.';
+    log('archive failed', { threadId, error: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ error: reason });
+  }
+});
+
 async function loadPage(userId: string, requestedPage: number) {
   const currentPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
   const skip = (currentPage - 1) * PAGE_SIZE;
