@@ -62,7 +62,8 @@
     hasMore: HAS_MORE,
     nextPage: NEXT_PAGE,
     loadingMore: false,
-    autoAdvanceTimer: 0
+    autoAdvanceTimer: 0,
+    prepTyping: ''
   };
   const reviewedIds = new Set();
   const primerStatus = new Map();
@@ -202,18 +203,6 @@
     const question = refs.chatInput.value.trim();
     if (!question) return;
 
-    const intent = await detectIntent(question);
-    if (intent === 'skip') {
-      refs.chatInput.value = '';
-      handleAutoIntent(intent, question);
-      return;
-    }
-    if (intent === 'archive') {
-      refs.chatInput.value = '';
-      handleArchiveIntent(question);
-      return;
-    }
-
     const history = ensureHistory(state.activeId);
     const asked = history.filter(turn => turn.role === 'user').length;
     if (MAX_TURNS > 0 && asked >= MAX_TURNS) {
@@ -231,6 +220,22 @@
     if (submitBtn) submitBtn.disabled = true;
 
     try {
+      const intent = await detectIntent(question);
+      if (intent === 'skip') {
+        setAssistantTyping(false);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
+        handleAutoIntent(intent, question, { alreadyLogged: true });
+        return;
+      }
+      if (intent === 'archive') {
+        setAssistantTyping(false);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
+        await handleArchiveIntent(question, { alreadyLogged: true });
+        return;
+      }
+
       const historyPayload = history.slice(0, -1);
       const resp = await fetch('/secretary/chat', {
         method: 'POST',
@@ -329,6 +334,7 @@
     updateEmailCard(thread);
     ensurePrimerFetch(threadId);
     ensureHistory(threadId);
+    refreshPrepTyping(threadId);
     setChatError('');
     renderChat(threadId);
     updateHint(threadId);
@@ -541,7 +547,9 @@
     const history = state.histories.get(threadId);
     if (!history.length) {
       const intro = buildIntroMessage(state.lookup.get(threadId));
-      history.push({ role: 'assistant', content: intro });
+      if (intro) {
+        history.push({ role: 'assistant', content: intro });
+      }
     }
     return history;
   }
@@ -552,9 +560,7 @@
     if (primer) return primer;
 
     const status = getPrimerStatus(thread.threadId);
-    if (status === 'loading' || status === 'pending') {
-      return 'Give me a beat while I prep the rundown for this one…';
-    }
+    if (status === 'loading' || status === 'pending') return '';
     if (status === 'error') {
       return buildFallbackPrimer(thread);
     }
@@ -594,6 +600,7 @@
     const status = getPrimerStatus(threadId);
     if (status === 'loading' || status === 'pending') return;
     setPrimerStatus(threadId, 'loading');
+    state.prepTyping = threadId;
     fetchPrimer(threadId, 0);
   }
 
@@ -652,8 +659,23 @@
 
   function setPrimerStatus(threadId, status) {
     primerStatus.set(threadId, status);
+    if (status === 'loading' || status === 'pending') {
+      state.prepTyping = threadId;
+    } else if (state.prepTyping === threadId) {
+      state.prepTyping = '';
+    }
     const history = state.histories.get(threadId);
-    if (!history || !history.length) return;
+    if (!history || !history.length) {
+      const thread = state.lookup.get(threadId);
+      if (thread && status !== 'loading' && status !== 'pending') {
+        const intro = buildIntroMessage(thread);
+        if (intro) {
+          state.histories.set(threadId, [{ role: 'assistant', content: intro }]);
+        }
+      }
+      if (threadId === state.activeId) renderChat(threadId);
+      return;
+    }
     const thread = state.lookup.get(threadId);
     if (!thread || (thread.primer || '').trim()) return;
     if (history[0]?.role === 'assistant') {
@@ -661,6 +683,15 @@
       if (threadId === state.activeId) {
         renderChat(threadId);
       }
+    }
+  }
+
+  function refreshPrepTyping(threadId) {
+    const status = getPrimerStatus(threadId);
+    if (status === 'loading' || status === 'pending') {
+      state.prepTyping = threadId;
+    } else if (state.prepTyping === threadId) {
+      state.prepTyping = '';
     }
   }
 
@@ -672,8 +703,13 @@
     const history = state.histories.get(threadId);
     if (history && history.length && history[0]?.role === 'assistant') {
       history[0].content = primer;
+    } else {
+      state.histories.set(threadId, [{ role: 'assistant', content: primer }]);
     }
     setPrimerStatus(threadId, 'ready');
+    if (state.prepTyping === threadId) {
+      state.prepTyping = '';
+    }
     if (threadId === state.activeId) {
       renderChat(threadId);
     }
@@ -683,8 +719,9 @@
     if (!refs.chatLog) return;
     const history = ensureHistory(threadId);
     if (!history.length) {
-      let view = chatPlaceholder();
-      if (state.typing && threadId === state.activeId) {
+      const showTyping = (state.typing && threadId === state.activeId) || state.prepTyping === threadId;
+      let view = showTyping ? '' : chatPlaceholder();
+      if (showTyping) {
         view += typingIndicatorHtml();
       }
       refs.chatLog.innerHTML = view;
@@ -879,11 +916,14 @@
     setActiveThread(nextId);
   }
 
-  function handleAutoIntent(intent, userText) {
+  function handleAutoIntent(intent, userText, options = {}) {
     if (!state.activeId || intent !== 'skip') return;
+    const alreadyLogged = Boolean(options.alreadyLogged);
     const history = ensureHistory(state.activeId);
-    history.push({ role: 'user', content: userText });
-    renderChat(state.activeId);
+    if (!alreadyLogged) {
+      history.push({ role: 'user', content: userText });
+      renderChat(state.activeId);
+    }
 
     history.push({ role: 'assistant', content: 'Skipping for now. It stays in Needs Review.' });
     renderChat(state.activeId);
@@ -905,11 +945,14 @@
     }
   }
 
-  async function handleArchiveIntent(userText) {
+  async function handleArchiveIntent(userText, options = {}) {
     if (!state.activeId) return;
+    const alreadyLogged = Boolean(options.alreadyLogged);
     const history = ensureHistory(state.activeId);
-    history.push({ role: 'user', content: userText });
-    renderChat(state.activeId);
+    if (!alreadyLogged) {
+      history.push({ role: 'user', content: userText });
+      renderChat(state.activeId);
+    }
 
     history.push({ role: 'assistant', content: 'Archiving this email in Gmail…' });
     renderChat(state.activeId);
