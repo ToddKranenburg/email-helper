@@ -349,8 +349,8 @@ router.post('/api/archive', async (req: Request, res: Response) => {
   }
 });
 
-async function loadPage(userId: string, requestedPage: number) {
-  return loadPageWithOpts(userId, requestedPage, {});
+async function loadPage(userId: string, requestedPage: number, opts: { assumeMore?: boolean } = {}) {
+  return loadPageWithOpts(userId, requestedPage, opts);
 }
 
 async function loadPageWithOpts(userId: string, requestedPage: number, opts: { assumeMore?: boolean }) {
@@ -662,7 +662,7 @@ function createTraceId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function triggerBackgroundIngest(sessionData: any, userId: string, opts?: { maxPages?: number }) {
+function triggerBackgroundIngest(sessionData: any, userId: string, opts?: { maxPages?: number; minNew?: number }) {
   ingestInbox(sessionData, opts)
     .then(() => {
       markIngestStatus(userId, 'done');
