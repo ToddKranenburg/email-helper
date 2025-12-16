@@ -2,7 +2,9 @@
   const bootstrap = window.SECRETARY_BOOTSTRAP || {};
   const threads = Array.isArray(bootstrap.threads) ? bootstrap.threads : [];
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
-  const TOTAL_ITEMS = typeof bootstrap.totalItems === 'number' ? bootstrap.totalItems : threads.length;
+  const PAGE_SIZE = typeof bootstrap.pageSize === 'number' ? bootstrap.pageSize : 20;
+  const HAS_MORE = Boolean(bootstrap.hasMore);
+  const NEXT_PAGE = typeof bootstrap.nextPage === 'number' ? bootstrap.nextPage : (HAS_MORE ? 2 : 0);
   const PRIMER_ENDPOINT = '/secretary/primer';
   const PRIMER_RETRY_DELAY = 1500;
   const MAX_PRIMER_POLLS = 8;
@@ -10,11 +12,13 @@
 
   const refs = {
     count: document.getElementById('triage-count'),
+    loadMoreHead: document.getElementById('load-more-head'),
     progress: document.getElementById('triage-progress'),
     progressTrack: document.querySelector('.triage-progress'),
     queuePill: document.getElementById('queue-pill-text'),
     emailCard: document.getElementById('email-card'),
     emailEmpty: document.getElementById('email-empty'),
+    loadMoreEmpty: document.getElementById('load-more-empty'),
     emailEmptyText: document.querySelector('#email-empty p'),
     avatar: document.getElementById('email-avatar'),
     sender: document.getElementById('email-sender'),
@@ -54,9 +58,14 @@
     histories: new Map(),
     activeId: '',
     typing: false,
-    headerTotal: TOTAL_ITEMS || threads.length,
+    totalLoaded: threads.length,
+    pageSize: PAGE_SIZE,
+    hasMore: HAS_MORE,
+    nextPage: NEXT_PAGE,
+    loadingMore: false,
     autoAdvanceTimer: 0
   };
+  const reviewedIds = new Set();
   const primerStatus = new Map();
   const primerRetryTimers = new Map();
 
@@ -78,6 +87,7 @@
     state.needs.push(thread.threadId);
     primerStatus.set(thread.threadId, thread.primer ? 'ready' : 'idle');
   });
+  state.totalLoaded = state.positions.size;
 
   init();
 
@@ -86,6 +96,7 @@
     updateProgress();
     updateQueuePill();
     updateDrawerLists();
+    updateLoadMoreButtons();
     wireEvents();
 
     if (refs.previewToggle && refs.preview) {
@@ -114,6 +125,13 @@
     refs.doneBtn.addEventListener('click', () => markCurrentDone('button'));
     refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
 
+    if (refs.loadMoreHead) {
+      refs.loadMoreHead.addEventListener('click', () => fetchNextPage('heading'));
+    }
+    if (refs.loadMoreEmpty) {
+      refs.loadMoreEmpty.addEventListener('click', () => fetchNextPage('empty-card'));
+    }
+
     if (refs.mapToggle && refs.drawer) {
       refs.mapToggle.addEventListener('click', () => toggleDrawer(true));
       refs.drawer.addEventListener('click', (event) => {
@@ -133,6 +151,11 @@
   }
 
   function handleDrawerClick(event) {
+    const loadMoreBtn = event.target.closest('.load-more');
+    if (loadMoreBtn) {
+      fetchNextPage('button');
+      return;
+    }
     const target = event.target.closest('.drawer-thread');
     if (!target) return;
     const threadId = target.dataset.threadId;
@@ -214,6 +237,51 @@
     }
   }
 
+  async function fetchNextPage(reason) {
+    if (!state.hasMore || state.loadingMore) return [];
+    state.loadingMore = true;
+    updateDrawerLists();
+    const targetPage = state.nextPage || Math.floor((state.totalLoaded || 0) / state.pageSize) + 1;
+    try {
+      const resp = await fetch(`/api/threads?page=${targetPage}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !Array.isArray(data?.threads)) {
+        throw new Error(data?.error || 'Unable to load more emails.');
+      }
+      const incoming = data.threads.map(normalizeThread).filter(Boolean);
+      const added = appendThreads(incoming);
+      const meta = data.meta || {};
+      state.hasMore = Boolean(meta.hasMore);
+      state.nextPage = state.hasMore
+        ? (typeof meta.nextPage === 'number' ? meta.nextPage : targetPage + 1)
+        : 0;
+      state.totalLoaded = state.positions.size;
+      updateHeaderCount();
+      updateProgress();
+      updateQueuePill();
+      updateDrawerLists();
+      updateLoadMoreButtons();
+      if (state.activeId && state.lookup.has(state.activeId)) {
+        updateEmailCard(state.lookup.get(state.activeId));
+      }
+      if (!state.activeId && state.needs.length) {
+        setActiveThread(state.needs[0]);
+      }
+      return added;
+    } catch (err) {
+      console.error('Failed to load more threads', err);
+      return [];
+    } finally {
+      state.loadingMore = false;
+      updateDrawerLists();
+      updateLoadMoreButtons();
+    }
+  }
+
   function setActiveThread(threadId) {
     if (!threadId || !state.lookup.has(threadId)) return;
     clearAutoAdvance();
@@ -278,29 +346,74 @@
 
   function updateHeaderCount() {
     if (!refs.count) return;
-    const total = state.headerTotal;
-    const label = total
-      ? `${total} email${total === 1 ? '' : 's'}`
-      : 'No emails';
-    refs.count.textContent = `· ${label}`;
+    const loaded = getLoadedCount();
+    let label = '0 emails under review';
+    if (loaded > 0 && state.hasMore) {
+      label = `${loaded}+ emails under review`;
+    } else if (loaded > 0) {
+      label = `${loaded} email${loaded === 1 ? '' : 's'} under review`;
+    }
+    refs.count.textContent = label;
+    updateLoadMoreButtons();
   }
 
   function updateQueuePill() {
     if (!refs.queuePill) return;
     const remaining = state.needs.length;
-    refs.queuePill.textContent = remaining
-      ? `${remaining} remaining`
-      : 'All done';
+    const suffix = state.hasMore ? '+' : '';
+    if (remaining) {
+      refs.queuePill.textContent = `${remaining}${suffix} remaining`;
+      return;
+    }
+    refs.queuePill.textContent = state.hasMore ? 'Load more to continue' : 'All done';
+  }
+
+  function updateLoadMoreButtons() {
+    if (refs.loadMoreHead) {
+      refs.loadMoreHead.classList.remove('hidden');
+      if (state.hasMore) {
+        refs.loadMoreHead.disabled = state.loadingMore;
+        refs.loadMoreHead.textContent = state.loadingMore ? 'Loading…' : 'Load more';
+      } else {
+        refs.loadMoreHead.disabled = true;
+        refs.loadMoreHead.textContent = 'All emails loaded';
+      }
+    }
+    if (refs.loadMoreEmpty) {
+      refs.loadMoreEmpty.classList.remove('hidden');
+      if (state.hasMore) {
+        refs.loadMoreEmpty.disabled = state.loadingMore;
+        refs.loadMoreEmpty.textContent = state.loadingMore ? 'Loading…' : 'Load more';
+      } else {
+        refs.loadMoreEmpty.disabled = true;
+        refs.loadMoreEmpty.textContent = 'All emails loaded';
+      }
+    }
+  }
+
+  function getLoadedCount() {
+    return state.totalLoaded || state.positions.size || 0;
+  }
+
+  function getReviewedCount() {
+    return Math.min(reviewedIds.size, getLoadedCount());
+  }
+
+  function markReviewed(threadId) {
+    if (threadId) reviewedIds.add(threadId);
   }
 
   function updateProgress() {
     if (!refs.progress) return;
-    const total = state.headerTotal || (state.needs.length + state.done.length) || 1;
-    const done = state.done.length;
-    const pct = Math.min(100, Math.round((done / total) * 100));
+    const loaded = getLoadedCount();
+    const done = getReviewedCount();
+    const totalForCalc = loaded || 1;
+    const pct = Math.min(100, Math.round((done / totalForCalc) * 100));
     refs.progress.style.width = `${pct}%`;
     if (refs.progressTrack) {
       refs.progressTrack.setAttribute('aria-valuenow', String(pct));
+      const labelTotal = state.hasMore ? `${loaded}+` : `${loaded}`;
+      refs.progressTrack.setAttribute('aria-valuetext', `${done} reviewed out of ${labelTotal}`);
     }
   }
 
@@ -314,6 +427,16 @@
     } else {
       refs.needsList.innerHTML = '<li class="drawer-empty">Nothing queued up.</li>';
     }
+    if (state.hasMore) {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'drawer-thread load-more';
+      btn.textContent = state.loadingMore ? 'Loading…' : 'Load more';
+      btn.disabled = state.loadingMore;
+      li.appendChild(btn);
+      refs.needsList.appendChild(li);
+    }
 
     if (state.done.length) {
       state.done.forEach(id => appendDrawerItem(refs.doneList, id));
@@ -321,7 +444,7 @@
       refs.doneList.innerHTML = '<li class="drawer-empty">No finished emails yet.</li>';
     }
 
-    if (refs.needsCount) refs.needsCount.textContent = String(state.needs.length);
+    if (refs.needsCount) refs.needsCount.textContent = state.hasMore ? `${state.needs.length}+` : String(state.needs.length);
     if (refs.doneCount) refs.doneCount.textContent = String(state.done.length);
   }
 
@@ -336,6 +459,42 @@
     btn.innerHTML = `<strong>${htmlEscape(thread.from || 'Unknown sender')}</strong><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
     li.appendChild(btn);
     listEl.appendChild(li);
+  }
+
+  function appendThreads(items) {
+    const added = [];
+    items.forEach(thread => {
+      if (!thread || !thread.threadId) return;
+      if (state.lookup.has(thread.threadId)) return;
+      state.lookup.set(thread.threadId, thread);
+      state.positions.set(thread.threadId, state.positions.size);
+      state.needs.push(thread.threadId);
+      primerStatus.set(thread.threadId, thread.primer ? 'ready' : 'idle');
+      added.push(thread.threadId);
+    });
+    if (added.length) {
+      state.totalLoaded = state.positions.size;
+    }
+    return added;
+  }
+
+  function normalizeThread(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const threadId = typeof raw.threadId === 'string' ? raw.threadId.trim() : '';
+    if (!threadId) return null;
+    return {
+      threadId,
+      headline: typeof raw.headline === 'string' ? raw.headline.trim() : '',
+      from: typeof raw.from === 'string' ? raw.from.trim() : '',
+      subject: typeof raw.subject === 'string' ? raw.subject.trim() : '(no subject)',
+      summary: typeof raw.summary === 'string' ? raw.summary.trim() : '',
+      nextStep: typeof raw.nextStep === 'string' ? raw.nextStep.trim() : '',
+      link: typeof raw.link === 'string' ? raw.link : '',
+      primer: typeof raw.primer === 'string' ? raw.primer.trim() : '',
+      category: typeof raw.category === 'string' ? raw.category : '',
+      receivedAt: typeof raw.receivedAt === 'string' ? raw.receivedAt : '',
+      convo: typeof raw.convo === 'string' ? raw.convo : ''
+    };
   }
 
   function updateHint(threadId) {
@@ -554,11 +713,17 @@
     if (index === -1) return;
     state.needs.splice(index, 1);
     state.done.unshift(threadId);
+    markReviewed(threadId);
     updateProgress();
     updateDrawerLists();
+    updateHeaderCount();
+    updateQueuePill();
 
     if (!state.needs.length) {
-      setEmptyState('Inbox clear. Celebrate the tiny win.');
+      const message = state.hasMore
+        ? 'You reviewed everything loaded. Tap Load more to keep going.'
+        : 'All emails reviewed. Nice work.';
+      setEmptyState(message);
       toggleComposer(false);
       return;
     }
@@ -575,6 +740,7 @@
     if (index === -1) return;
     state.needs.splice(index, 1);
     state.needs.push(threadId);
+    markReviewed(threadId);
     updateDrawerLists();
     const nextId = state.needs[index] || state.needs[0];
     setActiveThread(nextId);
@@ -614,6 +780,10 @@
   }
 
   function setEmptyState(message) {
+    const fallback = state.hasMore
+      ? 'You reviewed everything loaded. Tap Load more to keep going.'
+      : 'All emails reviewed. Nice work.';
+    const copy = message || fallback;
     state.activeId = '';
     refs.emailCard.classList.add('hidden');
     refs.emailEmpty.classList.remove('hidden');
@@ -621,13 +791,17 @@
       refs.position.textContent = '';
       refs.position.classList.add('hidden');
     }
-    if (refs.emailEmptyText) refs.emailEmptyText.textContent = message;
+    if (refs.emailEmptyText) refs.emailEmptyText.textContent = copy;
+    if (refs.loadMoreEmpty) {
+      refs.loadMoreEmpty.classList.toggle('hidden', !state.hasMore);
+    }
     if (refs.mapToggle) {
       refs.mapToggle.setAttribute('aria-disabled', 'true');
       refs.mapToggle.disabled = true;
     }
     refs.chatLog.innerHTML = chatPlaceholder();
     updateQueuePill();
+    updateLoadMoreButtons();
   }
 
   function detectIntent(text) {
@@ -669,12 +843,13 @@
 
   function formatEmailPosition(threadId) {
     if (!threadId) return '';
-    const total = Math.max(state.headerTotal || 0, state.positions.size || 0);
+    const total = getLoadedCount();
     if (!total) return '';
     const position = state.positions.get(threadId);
     if (typeof position !== 'number') return '';
     const current = position + 1;
-    return `${current} of ${total}`;
+    const totalLabel = state.hasMore ? `${total}+` : `${total}`;
+    return `${current} of ${totalLabel}`;
   }
 
   function renderAssistantMarkdown(value) {

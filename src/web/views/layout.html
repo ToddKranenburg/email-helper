@@ -51,6 +51,12 @@
       margin: 4px 0 0;
       font-size: clamp(24px, 4vw, 40px);
     }
+    .triage-heading {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     .triage-controls {
       display: flex;
       gap: 10px;
@@ -79,8 +85,22 @@
     }
     .map-toggle:active,
     .sync-btn:active,
-    .triage-btn:active {
+    .triage-btn:active,
+    .load-more-btn:active {
       transform: scale(0.98);
+    }
+    .load-more-btn {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      padding: 8px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .load-more-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
     .triage-progress {
       width: 100%;
@@ -235,6 +255,9 @@
       text-align: center;
       color: var(--muted);
       background: rgba(255,255,255,0.5);
+    }
+    .empty-card .load-more-btn {
+      margin-top: 12px;
     }
     .assistant-stack {
       display: flex;
@@ -444,6 +467,15 @@
       flex-direction: column;
       gap: 2px;
     }
+    .drawer-thread.load-more {
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }
+    .drawer-thread.load-more:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .drawer-thread.active {
       border-color: var(--accent);
       background: rgba(92,107,255,0.12);
@@ -531,6 +563,7 @@
     const form = document.getElementById('ingest-form');
     const overlay = document.getElementById('loading');
     const errorBox = document.getElementById('ingest-error');
+    const loadingText = overlay ? overlay.querySelector('.loading-text') : null;
     let ingestInFlight = false;
 
     async function triggerIngest() {
@@ -541,18 +574,23 @@
         errorBox.classList.add('hidden');
       }
       if (overlay) overlay.classList.remove('hidden');
+      setLoadingText('Syncing Gmail…');
       try {
-        const resp = await fetch(form.action || '/ingest', { method: 'POST', credentials: 'same-origin' });
-        if (resp.ok) {
-          if (resp.redirected && resp.url) {
-            window.location.href = resp.url;
-          } else {
-            window.location.reload();
-          }
+        const resp = await fetch(form.action || '/ingest', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data?.status === 'error') {
+          const message = (data?.message || data?.error || '').trim();
+          throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
+        }
+        if (data?.status === 'done') {
+          window.location.reload();
           return;
         }
-        const message = (await resp.text().catch(() => '')).trim();
-        throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
+        await pollIngestStatus();
       } catch (err) {
         console.error('Inbox ingest failed', err);
         if (overlay) overlay.classList.add('hidden');
@@ -563,6 +601,50 @@
       } finally {
         ingestInFlight = false;
       }
+    }
+
+    async function pollIngestStatus(attempt = 0) {
+      const MAX_ATTEMPTS = 120; // ~2 minutes
+      if (attempt > MAX_ATTEMPTS) {
+        throw new Error('Sync is taking longer than expected. Please try again.');
+      }
+      await wait(1000);
+      try {
+        setLoadingText('Still syncing…');
+        const resp = await fetch('/ingest/status', {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const message = (data?.error || '').trim();
+          throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
+        }
+        if (data?.status === 'done') {
+          setLoadingText('Finishing up…');
+          window.location.reload();
+          return;
+        }
+        if (data?.status === 'error') {
+          const message = (data?.error || '').trim();
+          throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
+        }
+        if (data?.status === 'unauthorized') {
+          throw new Error('Please re-authenticate with Google to sync.');
+        }
+        return pollIngestStatus(attempt + 1);
+      } catch (err) {
+        throw err;
+      }
+    }
+
+    function wait(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function setLoadingText(message) {
+      if (loadingText) loadingText.textContent = message;
     }
 
     if (form) {

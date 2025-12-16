@@ -18,8 +18,7 @@ const PAGE_SIZE = 20;
 const PRIMER_BACKGROUND_BATCH = 6;
 const primerCache = new Map<string, string>();
 const primerPending = new Map<string, Promise<string>>();
-
-type SummaryWithThread = Summary & { Thread: Thread | null };
+const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -32,6 +31,17 @@ router.get('/', async (req: Request, res: Response) => {
   res.send(`<a href="/auth/google">Connect Gmail</a>`);
 });
 
+type PageMeta = {
+  totalItems: number;
+  pageSize: number;
+  currentPage: number;
+  hasMore: boolean;
+  nextPage: number | null;
+};
+
+type SummaryWithThread = Summary & { Thread: Thread | null };
+type DecoratedSummary = SummaryWithThread & { chatPrimer?: string };
+
 router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
@@ -42,47 +52,35 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   log('start', { userId });
   await ensureUserRecord(sessionData);
 
+  const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
+  const listStart = performance.now();
+  const pageData = await loadPage(userId, requestedPage);
+  log('loaded summaries', { durationMs: elapsedMs(listStart), returned: pageData.items.length, page: pageData.currentPage });
+
   // Decide whether to auto-ingest AFTER rendering (first-time/empty state).
-  const countStart = performance.now();
-  const totalItems = await prisma.summary.count({ where: { userId } });
-  log('summary count complete', { durationMs: elapsedMs(countStart), totalItems });
-  const hasSummaries = totalItems > 0;
+  const hasSummaries = pageData.totalItems > 0;
   if (hasSummaries) {
     sessionData.skipAutoIngest = true;
   }
   const autoIngest = !hasSummaries && !sessionData.skipAutoIngest;
 
-  const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
-  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
-  const currentPage = Number.isFinite(requestedPage) ? Math.min(Math.max(requestedPage, 1), totalPages) : 1;
-  const skip = (currentPage - 1) * PAGE_SIZE;
-
-  const listStart = performance.now();
-  const visible = await prisma.summary.findMany({
-    where: { userId },
-    include: { Thread: true },
-    orderBy: [
-      { Thread: { lastMessageTs: 'desc' } },
-      { createdAt: 'desc' }
-    ],
-    skip,
-    take: PAGE_SIZE
-  }) as SummaryWithThread[];
-  log('loaded summaries', { durationMs: elapsedMs(listStart), returned: visible.length, page: currentPage });
-
   const templateStart = performance.now();
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
-  const primerInputs = visible.map(buildPrimerInputFromSummary);
-  const decorated = visible.map(item => ({
-    ...item,
-    chatPrimer: getCachedPrimer(userId, item.threadId) || ''
-  }));
+  const primerInputs = pageData.items.map(buildPrimerInputFromSummary);
+  const decorated = decorateSummariesWithPrimers(userId, pageData.items);
 
   // Inject a small flag the client script can read to auto-trigger ingest
   const renderStart = performance.now();
-  const withFlag = `${render(body, decorated, totalItems)}
+  const pageMeta: PageMeta = {
+    totalItems: pageData.totalItems,
+    pageSize: PAGE_SIZE,
+    currentPage: pageData.currentPage,
+    hasMore: pageData.hasMore,
+    nextPage: pageData.nextPage
+  };
+  const withFlag = `${render(body, decorated, pageMeta)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -94,27 +92,36 @@ router.get('/dashboard', async (req: Request, res: Response) => {
 
 router.post('/ingest', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
-  if (!sessionData.googleTokens || !sessionData.user?.id) return res.status(401).send('auth first');
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).send('auth first');
+  }
   const userId = sessionData.user.id;
   await ensureUserRecord(sessionData);
   sessionData.skipAutoIngest = true;
 
-  // Clear current summaries so the dashboard shows only the latest pull
-  await prisma.summary.deleteMany({ where: { userId } });
-  try { await prisma.processing.deleteMany({ where: { userId } }); } catch { /* optional table */ }
-
-  try {
-    await ingestInbox(req);
-    res.redirect('/dashboard');
-  } catch (err) {
-    console.error('Inbox ingest failed', err);
-    if (err instanceof GaxiosError && err.response?.status === 403) {
-      return res
-        .status(403)
-        .send('Gmail refused to share inbox data. Please disconnect and reconnect your Google account.');
-    }
-    res.status(500).send('Unable to sync your Gmail inbox right now. Please try again.');
+  const existing = ingestStatus.get(userId);
+  if (existing?.status === 'running') {
+    return res.json({ status: 'running' });
   }
+
+  const sessionSnapshot = cloneSessionForIngest(sessionData);
+  if (!sessionSnapshot) {
+    return res.status(400).json({ status: 'error', message: 'Missing session data for ingest.' });
+  }
+
+  markIngestStatus(userId, 'running');
+  triggerBackgroundIngest(sessionSnapshot, userId);
+  res.json({ status: 'running' });
+});
+
+router.get('/ingest/status', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  const userId = sessionData?.user?.id;
+  if (!sessionData?.googleTokens || !userId) {
+    return res.status(401).json({ status: 'unauthorized' });
+  }
+  const state = ingestStatus.get(userId) || { status: 'idle', updatedAt: Date.now() };
+  res.json({ status: state.status, updatedAt: state.updatedAt, error: state.error });
 });
 
 router.post('/secretary/chat', async (req: Request, res: Response) => {
@@ -208,6 +215,84 @@ router.get('/secretary/primer/:threadId', async (req: Request, res: Response) =>
   return res.status(202).json({ primer: '', status: 'pending' });
 });
 
+router.get('/api/threads', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const userId = sessionData.user.id;
+  const traceId = createTraceId();
+  const log = scopedLogger(`threads:${traceId}`);
+  const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
+
+  try {
+    const pageData = await loadPage(userId, requestedPage);
+    log('page ready', { page: pageData.currentPage, returned: pageData.items.length });
+    const decorated = decorateSummariesWithPrimers(userId, pageData.items);
+    queuePrimerPrefetch(userId, pageData.items.map(buildPrimerInputFromSummary), traceId);
+    return res.json({
+      threads: summariesToThreads(decorated),
+      meta: {
+        totalItems: pageData.totalItems,
+        pageSize: PAGE_SIZE,
+        currentPage: pageData.currentPage,
+        hasMore: pageData.hasMore,
+        nextPage: pageData.nextPage
+      }
+    });
+  } catch (err) {
+    log('failed to load page', { error: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ error: 'Unable to load more emails right now. Please try again.' });
+  }
+});
+
+async function loadPage(userId: string, requestedPage: number) {
+  const currentPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
+  const skip = (currentPage - 1) * PAGE_SIZE;
+  const results = await prisma.summary.findMany({
+    where: { userId },
+    include: { Thread: true },
+    orderBy: [
+      { Thread: { lastMessageTs: 'desc' } },
+      { createdAt: 'desc' }
+    ],
+    skip,
+    take: PAGE_SIZE + 1 // fetch one extra to infer "has more" without full count
+  }) as SummaryWithThread[];
+  const hasMore = results.length > PAGE_SIZE;
+  const items = hasMore ? results.slice(0, PAGE_SIZE) : results;
+  const totalItems = skip + items.length + (hasMore ? 1 : 0); // lower bound: we know there is at least one more when hasMore
+  const totalPages = hasMore ? currentPage + 1 : currentPage;
+  const nextPage = hasMore ? currentPage + 1 : null;
+  return { items, totalItems, totalPages, currentPage, hasMore, nextPage };
+}
+
+function decorateSummariesWithPrimers(userId: string, items: SummaryWithThread[]): DecoratedSummary[] {
+  return items.map(item => ({
+    ...item,
+    chatPrimer: getCachedPrimer(userId, item.threadId) || ''
+  }));
+}
+
+function summariesToThreads(items: DecoratedSummary[]): SecretaryEmail[] {
+  return items.map(x => {
+    const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
+    return {
+      threadId: x.threadId,
+      headline: x.headline || '',
+      from: formatSender(x.Thread),
+      subject: x.Thread?.subject || '(no subject)',
+      summary: x.tldr || '',
+      nextStep: x.nextStep || '',
+      link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : '',
+      primer: x.chatPrimer || '',
+      category: x.category || '',
+      receivedAt: emailTs.toISOString(),
+      convo: x.convoText || ''
+    };
+  });
+}
+
 function emojiForCategory(cat: string): string {
   const c = (cat || '').toLowerCase();
   if (c.startsWith('marketing')) return '🏷️';
@@ -235,29 +320,22 @@ type SecretaryEmail = {
   convo: string;
 };
 
-function render(tpl: string, items: any[], totalItems: number) {
-  const secretaryScript = renderSecretaryAssistant(items, totalItems);
+function render(tpl: string, items: DecoratedSummary[], meta: PageMeta) {
+  const secretaryScript = renderSecretaryAssistant(items, meta);
   return `${tpl}\n${secretaryScript}`;
 }
 
-function renderSecretaryAssistant(items: any[], totalItems: number) {
-  const threads: SecretaryEmail[] = items.map(x => {
-    const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
-    return {
-      threadId: x.threadId,
-      headline: x.headline || '',
-      from: formatSender(x.Thread),
-      subject: x.Thread?.subject || '(no subject)',
-      summary: x.tldr || '',
-      nextStep: x.nextStep || '',
-      link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : '',
-      primer: x.chatPrimer || '',
-      category: x.category || '',
-      receivedAt: emailTs.toISOString(),
-      convo: x.convoText || ''
-    };
-  });
-  const payload = safeJson({ threads, maxTurns: MAX_CHAT_TURNS, totalItems }); // consumed by src/web/public/secretary.js
+function renderSecretaryAssistant(items: DecoratedSummary[], meta: PageMeta) {
+  const threads = summariesToThreads(items);
+  const payload = safeJson({
+    threads,
+    maxTurns: MAX_CHAT_TURNS,
+    totalItems: meta.totalItems,
+    pageSize: meta.pageSize,
+    hasMore: meta.hasMore,
+    currentPage: meta.currentPage,
+    nextPage: meta.nextPage
+  }); // consumed by src/web/public/secretary.js
   return `
 <script id="secretary-bootstrap">window.SECRETARY_BOOTSTRAP = ${payload};</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.umd.min.js" defer></script>
@@ -453,4 +531,33 @@ function createTraceId() {
     return crypto.randomUUID();
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function triggerBackgroundIngest(sessionData: any, userId: string) {
+  ingestInbox(sessionData)
+    .then(() => {
+      markIngestStatus(userId, 'done');
+    })
+    .catch((err: unknown) => {
+      const gaxios = err instanceof GaxiosError ? err : undefined;
+      const message = gaxios?.response?.status === 403
+        ? 'Gmail refused to share inbox data. Please reconnect your Google account.'
+        : 'Unable to sync your Gmail inbox right now. Please try again.';
+      markIngestStatus(userId, 'error', message);
+    });
+}
+
+function markIngestStatus(userId: string, status: 'idle' | 'running' | 'done' | 'error', error?: string) {
+  ingestStatus.set(userId, { status, updatedAt: Date.now(), error });
+  if (status === 'done' || status === 'error') {
+    setTimeout(() => ingestStatus.delete(userId), 5 * 60 * 1000); // clean up after a bit
+  }
+}
+
+function cloneSessionForIngest(sessionData: any) {
+  if (!sessionData?.googleTokens || !sessionData?.user?.id) return null;
+  return {
+    googleTokens: { ...(sessionData.googleTokens || {}) },
+    user: { ...(sessionData.user || {}) }
+  };
 }

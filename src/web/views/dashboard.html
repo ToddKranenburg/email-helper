@@ -2,7 +2,10 @@
   <header class="triage-header">
     <div class="triage-title">
       <p class="triage-label">Primary Inbox</p>
-      <h1 class="triage-count" id="triage-count">0 emails</h1>
+      <div class="triage-heading">
+        <h1 class="triage-count" id="triage-count">0 emails</h1>
+        <button class="load-more-btn hidden" id="load-more-head" type="button">Load more</button>
+      </div>
     </div>
     <div class="triage-controls">
       <button id="map-toggle" class="map-toggle" type="button" aria-expanded="false" aria-controls="inbox-drawer">Inbox map</button>
@@ -39,6 +42,7 @@
       </div>
       <div class="empty-card hidden" id="email-empty">
         <p>Nothing left in Needs Review. You’re caught up.</p>
+        <button class="load-more-btn hidden" id="load-more-empty" type="button">Load more</button>
       </div>
 
       <section class="assistant-stack" id="assistant-panel">

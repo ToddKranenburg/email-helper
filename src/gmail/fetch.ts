@@ -3,7 +3,6 @@ import { gmailClient, INBOX_QUERY } from './client.js';
 import { normalizeBody } from './normalize.js';
 import { getAuthedClient } from '../auth/google.js';
 import { prisma } from '../store/db.js';
-import type { Request } from 'express';
 import type { gmail_v1 } from 'googleapis';
 import type { GaxiosResponse } from 'gaxios';
 
@@ -24,12 +23,11 @@ function parseFrom(headerValue: string | null | undefined): { name?: string; ema
   return { name, email };
 }
 
-export async function ingestInbox(req: Request) {
-  const session = req.session as any;
+export async function ingestInbox(session: any) {
   const user = session?.user;
   if (!user?.id) throw new Error('User session missing during ingest');
 
-  const auth = getAuthedClient(req.session);
+  const auth = getAuthedClient(session);
   const gmail: gmail_v1.Gmail = gmailClient(auth);
 
   let pageToken: string | undefined = undefined;
@@ -144,7 +142,7 @@ async function summarizeAndStore(
   userId: string
 ) {
   const s = await summarize({ subject, people, convoText });
-  await prisma.summary.create({
+  const created = await prisma.summary.create({
     data: {
       threadId,
       userId,
@@ -155,6 +153,15 @@ async function summarizeAndStore(
       nextStep: s.next_step,
       convoText,
       confidence: s.confidence
+    }
+  });
+
+  // Keep only the freshest summary per thread to avoid duplicating entries during repeated syncs.
+  await prisma.summary.deleteMany({
+    where: {
+      userId,
+      threadId,
+      id: { not: created.id }
     }
   });
 }
