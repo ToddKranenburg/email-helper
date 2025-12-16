@@ -14,12 +14,47 @@ function createOAuthClient() {
 
 const sharedClient = createOAuthClient();
 
-const GMAIL_SCOPES = [
+export const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send'
 ] as const;
 
-const SCOPES = [...GMAIL_SCOPES];
+function parseScopes(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/[,\s]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+const ENV_SCOPES = parseScopes(process.env.GOOGLE_SCOPES);
+const REQUESTED_SCOPES = Array.from(new Set([...GMAIL_SCOPES, ...ENV_SCOPES]));
+const SCOPES = [...REQUESTED_SCOPES];
+
+export class MissingScopeError extends Error {
+  missingScopes: string[];
+
+  constructor(missingScopes: string[]) {
+    super('Missing required Google scopes');
+    this.name = 'MissingScopeError';
+    this.missingScopes = missingScopes;
+  }
+}
+
+function parseGrantedScopes(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter(Boolean).map(String);
+  if (typeof raw === 'string') {
+    return raw.split(/\s+/).map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+export function getMissingGmailScopes(tokens: { scope?: string | string[] } | null | undefined): string[] {
+  const grantedScopes = parseGrantedScopes(tokens?.scope);
+  if (!grantedScopes.length) return [...REQUESTED_SCOPES];
+  const scopeSet = new Set(grantedScopes);
+  return REQUESTED_SCOPES.filter(scope => !scopeSet.has(scope));
+}
 
 authRouter.get('/google', (req: Request, res: Response) => {
   const url = sharedClient.generateAuthUrl({
@@ -36,15 +71,11 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
   const { tokens } = await oauthClient.getToken(code);
   oauthClient.setCredentials(tokens);
 
-  const grantedScopes = Array.isArray(tokens.scope)
-    ? tokens.scope
-    : (typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/).filter(Boolean) : []);
-  const scopeSet = new Set(grantedScopes);
-  const missingScopes = grantedScopes.length ? GMAIL_SCOPES.filter(scope => !scopeSet.has(scope)) : [];
+  const missingScopes = getMissingGmailScopes(tokens);
   if (missingScopes.length) {
     console.error('User did not grant the required Gmail scopes', {
       missingScopes,
-      grantedScopes
+      grantedScopes: tokens.scope
     });
     return res
       .status(403)
@@ -86,6 +117,10 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
 export function getAuthedClient(sessionObj: any) {
   if (!sessionObj?.googleTokens) {
     throw new Error('Missing Google tokens on session');
+  }
+  const missingScopes = getMissingGmailScopes(sessionObj.googleTokens);
+  if (missingScopes.length) {
+    throw new MissingScopeError(missingScopes);
   }
   const client = createOAuthClient();
   client.setCredentials(sessionObj.googleTokens);

@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
 import { gmailClient } from '../gmail/client.js';
-import { getAuthedClient } from '../auth/google.js';
+import { getAuthedClient, getMissingGmailScopes, MissingScopeError } from '../auth/google.js';
 import { normalizeBody } from '../gmail/normalize.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
@@ -21,12 +21,50 @@ const primerCache = new Map<string, string>();
 const primerPending = new Map<string, Promise<string>>();
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
+const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
+
+function clearGoogleSession(sessionData: any) {
+  if (!sessionData) return;
+  delete sessionData.googleTokens;
+}
+
+function ensureScopesForPage(sessionData: any, res: Response) {
+  const missingScopes = getMissingGmailScopes(sessionData?.googleTokens);
+  if (!missingScopes.length) return false;
+  clearGoogleSession(sessionData);
+  res.redirect(SCOPE_UPGRADE_PATH);
+  return true;
+}
+
+function ensureScopesForApi(sessionData: any, res: Response) {
+  const missingScopes = getMissingGmailScopes(sessionData?.googleTokens);
+  if (!missingScopes.length) return false;
+  clearGoogleSession(sessionData);
+  res.status(403).json({
+    error: 'Google permissions changed. Please reconnect your Google account to continue.',
+    missingScopes,
+    reconnectUrl: '/auth/google'
+  });
+  return true;
+}
+
+function handleMissingScopeError(err: unknown, sessionData: any, res: Response) {
+  if (!(err instanceof MissingScopeError)) return false;
+  clearGoogleSession(sessionData);
+  res.status(403).json({
+    error: 'Google permissions changed. Please reconnect your Google account to continue.',
+    missingScopes: err.missingScopes,
+    reconnectUrl: '/auth/google'
+  });
+  return true;
+}
 
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   const tokens = sessionData.googleTokens;
   if (tokens?.access_token && sessionData.user?.id) {
     // ✅ Already authorized: go straight to dashboard
+    if (ensureScopesForPage(sessionData, res)) return;
     return res.redirect('/dashboard');
   }
   // ❌ Not authorized yet: show connect link
@@ -48,6 +86,7 @@ type ThreadContext = { summary: SummaryWithThread; transcript: string; participa
 router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
+  if (ensureScopesForPage(sessionData, res)) return;
   const userId = sessionData.user.id;
   const traceId = createTraceId();
   const log = scopedLogger(`dashboard:${traceId}`);
@@ -98,6 +137,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).send('auth first');
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const userId = sessionData.user.id;
   await ensureUserRecord(sessionData);
   sessionData.skipAutoIngest = true;
@@ -123,6 +163,7 @@ router.get('/ingest/status', async (req: Request, res: Response) => {
   if (!sessionData?.googleTokens || !userId) {
     return res.status(401).json({ status: 'unauthorized' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const state = ingestStatus.get(userId) || { status: 'idle', updatedAt: Date.now() };
   res.json({ status: state.status, updatedAt: state.updatedAt, error: state.error });
 });
@@ -132,6 +173,7 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
 
   const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
   const question = typeof req.body?.question === 'string' ? req.body.question.trim() : '';
@@ -172,6 +214,7 @@ router.post('/secretary/review', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
   if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
 
@@ -202,6 +245,7 @@ router.post('/secretary/archive-intent', async (req: Request, res: Response) => 
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'Provide text to evaluate.' });
 
@@ -219,6 +263,7 @@ router.post('/secretary/intent', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'Provide text to evaluate.' });
 
@@ -236,6 +281,7 @@ router.get('/secretary/primer/:threadId', async (req: Request, res: Response) =>
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const userId = sessionData.user.id;
   const rawId = typeof req.params.threadId === 'string' ? req.params.threadId : '';
   const threadId = rawId.trim();
@@ -273,6 +319,7 @@ router.get('/api/threads', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const userId = sessionData.user.id;
   const traceId = createTraceId();
   const log = scopedLogger(`threads:${traceId}`);
@@ -305,6 +352,7 @@ router.get('/api/threads', async (req: Request, res: Response) => {
       }
     });
   } catch (err) {
+    if (handleMissingScopeError(err, sessionData, res)) return;
     log('failed to load page', { error: err instanceof Error ? err.message : String(err) });
     return res.status(500).json({ error: 'Unable to load more emails right now. Please try again.' });
   }
@@ -315,6 +363,7 @@ router.post('/api/archive', async (req: Request, res: Response) => {
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
   const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
   if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
 
@@ -340,6 +389,7 @@ router.post('/api/archive', async (req: Request, res: Response) => {
     log('archived thread', { threadId, userId: sessionData.user.id });
     return res.json({ status: 'archived' });
   } catch (err) {
+    if (handleMissingScopeError(err, sessionData, res)) return;
     const gaxios = err instanceof GaxiosError ? err : undefined;
     const reason = gaxios?.response?.status === 403
       ? 'Google blocked the archive request. Please reconnect Google and try again.'
@@ -668,6 +718,10 @@ function triggerBackgroundIngest(sessionData: any, userId: string, opts?: { maxP
       markIngestStatus(userId, 'done');
     })
     .catch((err: unknown) => {
+      if (err instanceof MissingScopeError) {
+        markIngestStatus(userId, 'error', 'Google permissions changed. Please reconnect your Google account.');
+        return;
+      }
       const gaxios = err instanceof GaxiosError ? err : undefined;
       const message = gaxios?.response?.status === 403
         ? 'Gmail refused to share inbox data. Please reconnect your Google account.'
