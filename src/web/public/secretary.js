@@ -9,6 +9,7 @@
   const PRIMER_RETRY_DELAY = 1500;
   const MAX_PRIMER_POLLS = 8;
   const DEFAULT_NUDGE = 'Type your next move here.';
+  const REVIEW_PROMPT = 'Give me a more detailed but easy-to-digest summary of this email. Highlight the main points, asks, deadlines, and any decisions in quick bullets.';
   window.SECRETARY_BOOTSTRAP = undefined;
 
   const refs = {
@@ -35,6 +36,7 @@
     chatInput: document.getElementById('assistant-input-field'),
     chatError: document.getElementById('assistant-error'),
     chatHint: document.getElementById('assistant-hint'),
+    reviewBtn: document.getElementById('action-review'),
     archiveBtn: document.getElementById('action-archive'),
     skipBtn: document.getElementById('action-skip'),
     mapToggle: document.getElementById('map-toggle'),
@@ -121,6 +123,9 @@
     refs.chatInput.addEventListener('keydown', handleChatKeydown);
     refs.chatInput.addEventListener('input', clearComposerNudge);
 
+    if (refs.reviewBtn) {
+      refs.reviewBtn.addEventListener('click', () => requestReview());
+    }
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
     }
@@ -263,6 +268,7 @@
   async function fetchNextPage(reason) {
     if (!state.hasMore || state.loadingMore) return [];
     state.loadingMore = true;
+    updateLoadMoreButtons();
     updateDrawerLists();
     const targetPage = state.nextPage || Math.floor((state.totalLoaded || 0) / state.pageSize) + 1;
     try {
@@ -737,6 +743,7 @@
 
   function toggleComposer(enabled) {
     refs.chatInput.disabled = !enabled || !state.activeId;
+    if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
     if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
     if (!enabled) clearComposerNudge();
@@ -755,6 +762,54 @@
       btn.disabled = false;
       if (label) btn.textContent = original;
     };
+  }
+
+  async function requestReview() {
+    if (!state.activeId || !refs.reviewBtn) return;
+    const threadId = state.activeId;
+    const history = ensureHistory(threadId);
+    const asked = history.filter(turn => turn.role === 'user').length;
+    if (MAX_TURNS > 0 && asked >= MAX_TURNS) {
+      setChatError('Chat limit reached for this email.');
+      return;
+    }
+    setChatError('');
+    history.push({ role: 'user', content: REVIEW_PROMPT });
+    renderChat(threadId);
+    toggleComposer(false);
+    setAssistantTyping(true);
+    const restore = withButtonBusy(refs.reviewBtn, 'Getting details…');
+
+    try {
+      const resp = await fetch('/secretary/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const last = history[history.length - 1];
+        if (last?.role === 'user' && last.content === REVIEW_PROMPT) {
+          history.pop();
+          renderChat(threadId);
+        }
+        throw new Error(data?.error || 'Unable to review this email.');
+      }
+      const reply = typeof data?.review === 'string' ? data.review.trim() : '';
+      history.push({ role: 'assistant', content: reply || 'Here’s what I could pull together.' });
+      renderChat(threadId);
+      updateHint(threadId);
+    } catch (err) {
+      console.error('Review request failed', err);
+      const message = err instanceof Error ? err.message : 'Unable to review this email.';
+      setChatError(message);
+    } finally {
+      restore();
+      setAssistantTyping(false);
+      toggleComposer(Boolean(state.activeId));
+      nudgeComposer(DEFAULT_NUDGE, { focus: true });
+    }
   }
 
   async function archiveCurrent(source) {

@@ -23,7 +23,12 @@ function parseFrom(headerValue: string | null | undefined): { name?: string; ema
   return { name, email };
 }
 
-export async function ingestInbox(session: any) {
+type IngestOptions = {
+  maxPages?: number;
+  minNew?: number;
+};
+
+export async function ingestInbox(session: any, opts: IngestOptions = {}) {
   const user = session?.user;
   if (!user?.id) throw new Error('User session missing during ingest');
 
@@ -32,6 +37,11 @@ export async function ingestInbox(session: any) {
 
   let pageToken: string | undefined = undefined;
   const limit = pLimit(6);
+  const maxPages = Number.isFinite(opts.maxPages) ? Math.max(1, Number(opts.maxPages)) : Infinity;
+  const minNew = Number.isFinite(opts.minNew) ? Math.max(0, Number(opts.minNew)) : THREAD_BATCH_SIZE;
+  let pageCount = 0;
+  let hasMore = false;
+  let createdCount = 0;
 
   do {
     // IMPORTANT: rely on Gmail search "category:primary" to mirror the UI
@@ -123,13 +133,20 @@ export async function ingestInbox(session: any) {
             .reverse()
             .join('\n\n---\n\n');
 
-          await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, user.id);
+          const created = await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, user.id);
+          if (created) createdCount += 1;
         })
       )
     );
 
     pageToken = list.data.nextPageToken || undefined;
+    hasMore = hasMore || Boolean(pageToken);
+    pageCount += 1;
+    if (createdCount >= minNew) break;
+    if (pageCount >= maxPages) break;
   } while (pageToken);
+
+  return { hasMore, created: createdCount };
 }
 
 import { summarize } from '../llm/summarize.js';
@@ -164,4 +181,6 @@ async function summarizeAndStore(
       id: { not: created.id }
     }
   });
+
+  return Boolean(created?.id);
 }

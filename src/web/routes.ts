@@ -20,6 +20,7 @@ const PRIMER_BACKGROUND_BATCH = 6;
 const primerCache = new Map<string, string>();
 const primerPending = new Map<string, Promise<string>>();
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
+const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -42,6 +43,7 @@ type PageMeta = {
 
 type SummaryWithThread = Summary & { Thread: Thread | null };
 type DecoratedSummary = SummaryWithThread & { chatPrimer?: string };
+type ThreadContext = { summary: SummaryWithThread; transcript: string; participants: string[] };
 
 router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -111,7 +113,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
   }
 
   markIngestStatus(userId, 'running');
-  triggerBackgroundIngest(sessionSnapshot, userId);
+  triggerBackgroundIngest(sessionSnapshot, userId, { maxPages: 2, minNew: PAGE_SIZE });
   res.json({ status: 'running' });
 });
 
@@ -143,32 +145,18 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
     return res.status(429).json({ error: 'Chat limit reached for this thread.' });
   }
 
-  const summary = await prisma.summary.findFirst({
-    where: { userId: sessionData.user.id, threadId },
-    include: { Thread: true }
-  });
-
-  if (!summary) return res.status(404).json({ error: 'Email summary not found.' });
-
-  let transcript = summary.convoText || '';
-  if (!transcript) {
-    transcript = await fetchTranscript(threadId, req);
-    if (transcript) {
-      await prisma.summary.update({ where: { id: summary.id }, data: { convoText: transcript } });
-    }
-  }
-  if (!transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
-
-  const participants = parseParticipants(summary.Thread?.participants);
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
 
   try {
     const reply = await chatAboutEmail({
-      subject: summary.Thread?.subject || '',
-      headline: summary.headline,
-      tldr: summary.tldr,
-      nextStep: summary.nextStep,
-      participants,
-      transcript,
+      subject: context.summary.Thread?.subject || '',
+      headline: context.summary.headline,
+      tldr: context.summary.tldr,
+      nextStep: context.summary.nextStep,
+      participants: context.participants,
+      transcript: context.transcript,
       history,
       question
     });
@@ -176,6 +164,36 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('secretary chat failed', err);
     res.status(500).json({ error: 'Unable to chat about this email right now. Please try again.' });
+  }
+});
+
+router.post('/secretary/review', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
+
+  try {
+    const review = await chatAboutEmail({
+      subject: context.summary.Thread?.subject || '',
+      headline: context.summary.headline,
+      tldr: context.summary.tldr,
+      nextStep: context.summary.nextStep,
+      participants: context.participants,
+      transcript: context.transcript,
+      history: [],
+      question: REVIEW_PROMPT
+    });
+    return res.json({ review });
+  } catch (err) {
+    console.error('secretary review failed', err);
+    return res.status(500).json({ error: 'Unable to review this email right now. Please try again.' });
   }
 });
 
@@ -259,9 +277,20 @@ router.get('/api/threads', async (req: Request, res: Response) => {
   const traceId = createTraceId();
   const log = scopedLogger(`threads:${traceId}`);
   const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
+  const targetPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
 
   try {
-    const pageData = await loadPage(userId, requestedPage);
+    // Only fetch the pages we need. If we already have enough summaries for this page, skip ingest.
+    const totalNeeded = targetPage * PAGE_SIZE;
+    const existing = await prisma.summary.count({ where: { userId } });
+    let ingestResult: { hasMore?: boolean } | undefined;
+    if (existing < totalNeeded) {
+      log('ingesting page batch', { requestedPage: targetPage, existing });
+      const minNew = Math.max(PAGE_SIZE, totalNeeded - existing);
+      ingestResult = await ingestInbox(sessionData, { maxPages: targetPage + 1, minNew });
+    }
+
+    const pageData = await loadPage(userId, targetPage, { assumeMore: Boolean(ingestResult?.hasMore) });
     log('page ready', { page: pageData.currentPage, returned: pageData.items.length });
     const decorated = decorateSummariesWithPrimers(userId, pageData.items);
     queuePrimerPrefetch(userId, pageData.items.map(buildPrimerInputFromSummary), traceId);
@@ -321,6 +350,10 @@ router.post('/api/archive', async (req: Request, res: Response) => {
 });
 
 async function loadPage(userId: string, requestedPage: number) {
+  return loadPageWithOpts(userId, requestedPage, {});
+}
+
+async function loadPageWithOpts(userId: string, requestedPage: number, opts: { assumeMore?: boolean }) {
   const currentPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
   const skip = (currentPage - 1) * PAGE_SIZE;
   const results = await prisma.summary.findMany({
@@ -333,9 +366,12 @@ async function loadPage(userId: string, requestedPage: number) {
     skip,
     take: PAGE_SIZE + 1 // fetch one extra to infer "has more" without full count
   }) as SummaryWithThread[];
-  const hasMore = results.length > PAGE_SIZE;
-  const items = hasMore ? results.slice(0, PAGE_SIZE) : results;
-  const totalItems = skip + items.length + (hasMore ? 1 : 0); // lower bound: we know there is at least one more when hasMore
+  const hasExtraRecord = results.length > PAGE_SIZE;
+  const items = hasExtraRecord ? results.slice(0, PAGE_SIZE) : results;
+  const filledPage = items.length === PAGE_SIZE;
+  // Optimistically assume more Gmail pages exist if we filled the current page (we only ingest one page at a time).
+  const hasMore = hasExtraRecord || filledPage || Boolean(opts.assumeMore);
+  const totalItems = skip + items.length + (hasExtraRecord ? 1 : 0);
   const totalPages = hasMore ? currentPage + 1 : currentPage;
   const nextPage = hasMore ? currentPage + 1 : null;
   return { items, totalItems, totalPages, currentPage, hasMore, nextPage };
@@ -465,6 +501,25 @@ async function fetchTranscript(threadId: string, req: Request) {
     console.error('Failed to fetch Gmail transcript', err);
     return '';
   }
+}
+
+async function loadThreadContext(userId: string, threadId: string, req: Request): Promise<ThreadContext | null> {
+  const summary = await prisma.summary.findFirst({
+    where: { userId, threadId },
+    include: { Thread: true }
+  }) as SummaryWithThread | null;
+  if (!summary) return null;
+
+  let transcript = summary.convoText || '';
+  if (!transcript) {
+    transcript = await fetchTranscript(threadId, req);
+    if (transcript) {
+      await prisma.summary.update({ where: { id: summary.id }, data: { convoText: transcript } });
+      summary.convoText = transcript;
+    }
+  }
+  const participants = parseParticipants(summary.Thread?.participants);
+  return { summary, transcript, participants };
 }
 
 function parseParticipants(raw?: string | null): string[] {
@@ -607,8 +662,8 @@ function createTraceId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function triggerBackgroundIngest(sessionData: any, userId: string) {
-  ingestInbox(sessionData)
+function triggerBackgroundIngest(sessionData: any, userId: string, opts?: { maxPages?: number }) {
+  ingestInbox(sessionData, opts)
     .then(() => {
       markIngestStatus(userId, 'done');
     })
