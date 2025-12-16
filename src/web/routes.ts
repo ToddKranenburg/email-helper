@@ -12,6 +12,7 @@ import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
 import type { Summary, Thread } from '@prisma/client';
+import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 
 export const router = Router();
 const PAGE_SIZE = 20;
@@ -175,6 +176,40 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('secretary chat failed', err);
     res.status(500).json({ error: 'Unable to chat about this email right now. Please try again.' });
+  }
+});
+
+router.post('/secretary/archive-intent', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'Provide text to evaluate.' });
+
+  try {
+    const decision = await detectArchiveIntent(text);
+    return res.json(decision);
+  } catch (err) {
+    console.error('archive intent detection failed', err);
+    return res.status(500).json({ error: 'Unable to evaluate archive intent right now.' });
+  }
+});
+
+router.post('/secretary/intent', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'Provide text to evaluate.' });
+
+  try {
+    const decision = await classifyIntent(text);
+    return res.json(decision);
+  } catch (err) {
+    console.error('secretary intent detection failed', err);
+    return res.status(500).json({ error: 'Unable to evaluate intent right now.' });
   }
 });
 

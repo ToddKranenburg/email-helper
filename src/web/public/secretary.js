@@ -8,6 +8,7 @@
   const PRIMER_ENDPOINT = '/secretary/primer';
   const PRIMER_RETRY_DELAY = 1500;
   const MAX_PRIMER_POLLS = 8;
+  const DEFAULT_NUDGE = 'Type your next move here.';
   window.SECRETARY_BOOTSTRAP = undefined;
 
   const refs = {
@@ -34,17 +35,13 @@
     chatInput: document.getElementById('assistant-input-field'),
     chatError: document.getElementById('assistant-error'),
     chatHint: document.getElementById('assistant-hint'),
-    doneBtn: document.getElementById('action-done'),
     archiveBtn: document.getElementById('action-archive'),
     skipBtn: document.getElementById('action-skip'),
     mapToggle: document.getElementById('map-toggle'),
     drawer: document.getElementById('inbox-drawer'),
     drawerClose: document.getElementById('drawer-close'),
     needsList: document.getElementById('needs-list'),
-    doneList: document.getElementById('done-list'),
-    needsCount: document.getElementById('needs-count'),
-    doneCount: document.getElementById('done-count'),
-    doneDetails: document.getElementById('done-details')
+    needsCount: document.getElementById('needs-count')
   };
 
   if (!refs.chatLog || !refs.chatForm || !refs.emailCard || !refs.emailEmpty) {
@@ -55,7 +52,6 @@
     lookup: new Map(),
     positions: new Map(),
     needs: [],
-    done: [],
     histories: new Map(),
     activeId: '',
     typing: false,
@@ -69,6 +65,7 @@
   const reviewedIds = new Set();
   const primerStatus = new Map();
   const primerRetryTimers = new Map();
+  let composerNudgeTimer = 0;
 
   const markedLib = resolveMarked();
   const linkify = typeof window.linkifyIt === 'function' ? window.linkifyIt() : null;
@@ -122,18 +119,26 @@
   function wireEvents() {
     refs.chatForm.addEventListener('submit', handleChatSubmit);
     refs.chatInput.addEventListener('keydown', handleChatKeydown);
+    refs.chatInput.addEventListener('input', clearComposerNudge);
 
-    refs.doneBtn.addEventListener('click', () => markCurrentDone('button'));
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
     }
-    refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
+    if (refs.skipBtn) {
+      refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
+    }
 
     if (refs.loadMoreHead) {
-      refs.loadMoreHead.addEventListener('click', () => fetchNextPage('heading'));
+      refs.loadMoreHead.addEventListener('click', async () => {
+        await fetchNextPage('heading');
+        nudgeComposer(DEFAULT_NUDGE, { focus: false });
+      });
     }
     if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.addEventListener('click', () => fetchNextPage('empty-card'));
+      refs.loadMoreEmpty.addEventListener('click', async () => {
+        await fetchNextPage('empty-card');
+        nudgeComposer(DEFAULT_NUDGE, { focus: false });
+      });
     }
 
     if (refs.mapToggle && refs.drawer) {
@@ -150,8 +155,17 @@
         }
       });
       if (refs.needsList) refs.needsList.addEventListener('click', handleDrawerClick);
-      if (refs.doneList) refs.doneList.addEventListener('click', handleDrawerClick);
     }
+
+    document.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const btn = target.closest('button');
+      if (!btn) return;
+      if (btn.closest('#assistant-form')) return;
+      if (!refs.chatInput || refs.chatInput.disabled) return;
+      nudgeComposer(DEFAULT_NUDGE, { focus: false });
+    });
   }
 
   function handleDrawerClick(event) {
@@ -183,10 +197,15 @@
     const question = refs.chatInput.value.trim();
     if (!question) return;
 
-    const intent = detectIntent(question);
-    if (intent === 'done' || intent === 'skip') {
+    const intent = await detectIntent(question);
+    if (intent === 'skip') {
       refs.chatInput.value = '';
       handleAutoIntent(intent, question);
+      return;
+    }
+    if (intent === 'archive') {
+      refs.chatInput.value = '';
+      handleArchiveIntent(question);
       return;
     }
 
@@ -237,7 +256,7 @@
       toggleComposer(true);
       const submitBtn2 = refs.chatForm.querySelector('button[type="submit"]');
       if (submitBtn2) submitBtn2.disabled = false;
-      refs.chatInput.focus();
+      nudgeComposer(DEFAULT_NUDGE, { focus: true });
     }
   }
 
@@ -283,6 +302,7 @@
       state.loadingMore = false;
       updateDrawerLists();
       updateLoadMoreButtons();
+      nudgeComposer('Loaded more - type your next move here.', { focus: false });
     }
   }
 
@@ -310,6 +330,7 @@
     updateQueuePill();
     toggleComposer(true);
     refs.chatInput.value = '';
+    nudgeComposer(DEFAULT_NUDGE, { focus: true });
   }
 
   function updateEmailCard(thread) {
@@ -422,9 +443,8 @@
   }
 
   function updateDrawerLists() {
-    if (!refs.needsList || !refs.doneList) return;
+    if (!refs.needsList) return;
     refs.needsList.innerHTML = '';
-    refs.doneList.innerHTML = '';
 
     if (state.needs.length) {
       state.needs.forEach(id => appendDrawerItem(refs.needsList, id));
@@ -442,14 +462,7 @@
       refs.needsList.appendChild(li);
     }
 
-    if (state.done.length) {
-      state.done.forEach(id => appendDrawerItem(refs.doneList, id));
-    } else {
-      refs.doneList.innerHTML = '<li class="drawer-empty">No finished emails yet.</li>';
-    }
-
     if (refs.needsCount) refs.needsCount.textContent = state.hasMore ? `${state.needs.length}+` : String(state.needs.length);
-    if (refs.doneCount) refs.doneCount.textContent = String(state.done.length);
   }
 
   function appendDrawerItem(listEl, threadId) {
@@ -504,7 +517,7 @@
   function updateHint(threadId) {
     if (!refs.chatHint) return;
     if (!MAX_TURNS || !threadId) {
-      refs.chatHint.textContent = 'Ask anything or tap Done / Skip.';
+      refs.chatHint.textContent = 'Ask anything or tap Archive / Skip.';
       return;
     }
     const history = ensureHistory(threadId);
@@ -699,11 +712,34 @@
     }
   }
 
+  function clearComposerNudge() {
+    if (composerNudgeTimer) {
+      window.clearTimeout(composerNudgeTimer);
+      composerNudgeTimer = 0;
+    }
+    if (!refs.chatForm) return;
+    refs.chatForm.classList.remove('nudged');
+    delete refs.chatForm.dataset.nudge;
+  }
+
+  function nudgeComposer(message, options = {}) {
+    if (!refs.chatForm || !refs.chatInput || refs.chatInput.disabled) return;
+    const { focus = true } = options;
+    if (focus) refs.chatInput.focus();
+    const label = message && message.trim() ? message.trim() : DEFAULT_NUDGE;
+    refs.chatForm.dataset.nudge = label;
+    refs.chatForm.classList.add('nudged');
+    if (composerNudgeTimer) window.clearTimeout(composerNudgeTimer);
+    composerNudgeTimer = window.setTimeout(() => {
+      clearComposerNudge();
+    }, 2600);
+  }
+
   function toggleComposer(enabled) {
     refs.chatInput.disabled = !enabled || !state.activeId;
-    refs.doneBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
-    refs.skipBtn.disabled = !enabled || !state.activeId;
+    if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
+    if (!enabled) clearComposerNudge();
   }
 
   function setAssistantTyping(value) {
@@ -738,7 +774,7 @@
       if (!resp.ok) {
         throw new Error(data?.error || 'Unable to archive this email.');
       }
-      markCurrentDone('archive');
+      removeCurrentFromQueue();
     } catch (err) {
       console.error('Failed to archive thread', err);
       const message = err instanceof Error ? err.message : 'Unable to archive this email.';
@@ -749,13 +785,12 @@
     }
   }
 
-  function markCurrentDone(source) {
+  function removeCurrentFromQueue() {
     if (!state.activeId || !state.needs.length) return;
     const threadId = state.activeId;
     const index = state.needs.indexOf(threadId);
     if (index === -1) return;
     state.needs.splice(index, 1);
-    state.done.unshift(threadId);
     markReviewed(threadId);
     updateProgress();
     updateDrawerLists();
@@ -790,15 +825,12 @@
   }
 
   function handleAutoIntent(intent, userText) {
-    if (!state.activeId) return;
+    if (!state.activeId || intent !== 'skip') return;
     const history = ensureHistory(state.activeId);
     history.push({ role: 'user', content: userText });
     renderChat(state.activeId);
 
-    const acknowledgement = intent === 'done'
-      ? 'Cool — marking this handled and moving forward.'
-      : 'Skipping for now. It stays in Needs Review.';
-    history.push({ role: 'assistant', content: acknowledgement });
+    history.push({ role: 'assistant', content: 'Skipping for now. It stays in Needs Review.' });
     renderChat(state.activeId);
     updateHint(state.activeId);
 
@@ -806,11 +838,7 @@
     const targetId = state.activeId;
     state.autoAdvanceTimer = window.setTimeout(() => {
       if (state.activeId !== targetId) return;
-      if (intent === 'done') {
-        markCurrentDone('auto');
-      } else {
-        skipCurrent('auto');
-      }
+      skipCurrent('auto');
       clearAutoAdvance();
     }, 600);
   }
@@ -819,6 +847,24 @@
     if (state.autoAdvanceTimer) {
       window.clearTimeout(state.autoAdvanceTimer);
       state.autoAdvanceTimer = 0;
+    }
+  }
+
+  async function handleArchiveIntent(userText) {
+    if (!state.activeId) return;
+    const history = ensureHistory(state.activeId);
+    history.push({ role: 'user', content: userText });
+    renderChat(state.activeId);
+
+    history.push({ role: 'assistant', content: 'Archiving this email in Gmail…' });
+    renderChat(state.activeId);
+    updateHint(state.activeId);
+
+    setAssistantTyping(true);
+    try {
+      await archiveCurrent('auto-intent');
+    } finally {
+      setAssistantTyping(false);
     }
   }
 
@@ -847,13 +893,32 @@
     updateLoadMoreButtons();
   }
 
-  function detectIntent(text) {
+  async function detectIntent(text) {
     const cleaned = text.replace(/[.!?]/g, '').trim().toLowerCase();
     if (!cleaned) return '';
-    const donePhrases = ['ok', 'done', 'next', 'cool', 'handled', 'all good', 'all set', 'next one', 'next email'];
-    if (donePhrases.includes(cleaned)) return 'done';
-    if (cleaned === 'skip' || cleaned === 'skip it') return 'skip';
-    return '';
+    const archivePhrases = ['archive', 'archive this', 'archive it', 'archive email', 'archive message', 'archive thread'];
+    if (archivePhrases.includes(cleaned)) return 'archive';
+    const skipPhrases = ['skip', 'skip it', 'skip this', 'skip this one', 'skip this email', 'skip this thread'];
+    if (skipPhrases.includes(cleaned)) return 'skip';
+    const intent = await evaluateIntent(text);
+    return intent === 'archive' || intent === 'skip' ? intent : '';
+  }
+
+  async function evaluateIntent(rawText) {
+    try {
+      const resp = await fetch('/secretary/intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ text: rawText })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return '';
+      return typeof data?.intent === 'string' ? data.intent : '';
+    } catch (err) {
+      console.warn('Intent check failed', err);
+      return '';
+    }
   }
 
   function toggleDrawer(open) {

@@ -53,11 +53,10 @@
         </div>
         <form id="assistant-form" class="assistant-input">
           <label class="sr-only" for="assistant-input-field">Ask the assistant anything</label>
-          <textarea id="assistant-input-field" placeholder="Type or just tap Done / Archive / Skip…" rows="1"></textarea>
+          <textarea id="assistant-input-field" placeholder="Type or just tap Archive / Skip…" rows="1"></textarea>
           <button type="submit">Send</button>
         </form>
         <div class="triage-actions">
-          <button class="triage-btn done" id="action-done" type="button">✔️ Done</button>
           <button class="triage-btn archive" id="action-archive" type="button">Archive in Gmail</button>
           <button class="triage-btn skip" id="action-skip" type="button">➡️ Skip</button>
         </div>
@@ -76,7 +75,7 @@
     <div class="drawer-header">
       <div>
         <p class="drawer-label">Global Inbox Map</p>
-        <h2 class="drawer-title" id="drawer-title">Needs Review vs Done</h2>
+        <h2 class="drawer-title" id="drawer-title">Needs Review</h2>
       </div>
       <button id="drawer-close" class="drawer-close" type="button" aria-label="Close inbox map">✕</button>
     </div>
@@ -88,19 +87,6 @@
       <ul id="needs-list" class="drawer-list" aria-live="polite">
         <li class="drawer-empty">Nothing queued up.</li>
       </ul>
-    </div>
-    <div class="drawer-section">
-      <details id="done-details">
-        <summary>
-          <div class="drawer-section-head">
-            <h3>Done</h3>
-            <span id="done-count">0</span>
-          </div>
-        </summary>
-        <ul id="done-list" class="drawer-list">
-          <li class="drawer-empty">No finished emails yet.</li>
-        </ul>
-      </details>
     </div>
   </div>
 </div>

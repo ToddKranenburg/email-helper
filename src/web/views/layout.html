@@ -326,10 +326,6 @@
       font-weight: 600;
       cursor: pointer;
     }
-    .triage-btn.done {
-      background: #12b886;
-      color: #fff;
-    }
     .triage-btn.archive {
       background: #eef2ff;
       color: #27336a;
@@ -346,6 +342,26 @@
       border-radius: 18px;
       padding: 12px 16px;
       background: #fff;
+      position: relative;
+    }
+    .assistant-input.nudged {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .assistant-input.nudged::after {
+      content: attr(data-nudge);
+      position: absolute;
+      top: -12px;
+      right: 16px;
+      background: #fff;
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      box-shadow: 0 10px 24px rgba(92,107,255,0.14);
+      pointer-events: none;
+      white-space: nowrap;
     }
     .assistant-input textarea {
       flex: 1;
