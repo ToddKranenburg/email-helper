@@ -14,20 +14,29 @@ export type ChatPrimerInput = {
   fromLine: string;
 };
 
-const SYSTEM_PROMPT = `You are the texting voice of a hyper-capable Gen Z executive assistant who sounds like a modern, confident secretary.
-Your job: craft the first message the assistant sends after scanning an email thread.
+export type SuggestedAction = 'archive' | 'more_info' | 'create_task' | 'skip';
+
+export type PrimerOutput = {
+  prompt: string;
+  suggestedAction: SuggestedAction;
+};
+
+const SYSTEM_PROMPT = `You are the texting voice of a hyper-capable Gen Z AI executive assistant who sounds like a modern, confident secretary and wants to help the user get through their inbox, accepting your limitations as an AI agent.
+Your job: craft the very first message after scanning an email thread.
 Rules:
-- Output JSON object: {"primers":[{ "threadId": "...", "prompt": "..." }]}
+- Output JSON: {"primers":[{ "threadId": "...", "prompt": "...", "suggestedAction": "archive|more_info|create_task|skip" }]}
 - One entry per thread ID provided.
-- Start by summarizing what the user just received (sender, org, subject, or summary) so they instantly know the situation.
-- After the context, propose the most logical next step (use NextStep if provided) and end by explicitly confirming if they want you to handle it.
-- Tone: casual-but-professional texting style, crisp, no fillers, always helpful.
-- Keep it punchy while staying descriptive.`;
+- Start by grounding: briefly name what just arrived (sender/org + subject/summary) so the user instantly knows which email this is.
+- Pick ONE most likely next action YOU would take as the recipient (archive | more_info | create_task | skip). Use NextStep if given; otherwise infer.
+- The prompt must naturally state that action, give a quick why, and end by explicitly asking permission to do it. No separate “Suggested action” label, no extra lines.
+- If you cannot justify an action, choose "more_info" and ask to dig deeper.
+- Keep it tight, conversational, and decisive (texting length).
+- Never claim you can directly RSVP, accept invites, click links, or send anything. If a response is needed (e.g., invite or approval), use only the allowed actions (archive|more_info|create_task|skip) and phrase it as drafting a reply, logging a reminder, or asking for more info before acting.`;
 
 const FALLBACK_SUGGESTIONS = [
-  'Want me to draft a reply and get it queued up?',
-  'Should I send a quick follow-up so this keeps moving?',
-  'Want me to set a reminder so it doesn’t fall through?'
+  'Want a tighter rundown? I can skim for deadlines and asks.',
+  'Need more context? I can dig up the key decisions for you.',
+  'Want me to pull the main points and next steps?'
 ];
 
 type PrimerOptions = {
@@ -37,11 +46,12 @@ type PrimerOptions = {
 export async function generateChatPrimers(
   entries: ChatPrimerInput[],
   options: PrimerOptions = {}
-): Promise<Record<string, string>> {
-  const result: Record<string, string> = {};
+): Promise<Record<string, PrimerOutput>> {
+  const result: Record<string, PrimerOutput> = {};
   const log = createPrimerLogger(options.traceId);
   const totalStart = performance.now();
   log('start', { count: entries.length, openai: Boolean(openai) });
+  const inputLookup = new Map(entries.map(item => [item.threadId, item]));
   if (!entries.length) {
     log('no entries supplied');
     return result;
@@ -85,7 +95,11 @@ NextStep: ${item.nextStep || 'No action'}`;
       const parsed = parsePrimerResponse(text);
       for (const entry of parsed) {
         if (entry.threadId && entry.prompt) {
-          result[entry.threadId] = entry.prompt.trim();
+          const input = inputLookup.get(entry.threadId);
+          result[entry.threadId] = {
+            prompt: entry.prompt.trim(),
+            suggestedAction: normalizeAction(entry.suggestedAction) || guessAction(input || {})
+          };
         }
       }
       processed += batch.length;
@@ -117,7 +131,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-function parsePrimerResponse(payload: string): { threadId: string; prompt: string }[] {
+function parsePrimerResponse(payload: string): { threadId: string; prompt: string; suggestedAction?: SuggestedAction }[] {
   if (!payload) return [];
   const match = payload.match(/\{[\s\S]*\}/);
   if (!match) return [];
@@ -135,18 +149,24 @@ function parsePrimerResponse(payload: string): { threadId: string; prompt: strin
   }
 }
 
-function fallbackPrimer(entry: ChatPrimerInput): string {
+function fallbackPrimer(entry: ChatPrimerInput): PrimerOutput {
   const summaryBase = (entry.summary || entry.headline || entry.subject || 'an email that needs your call').trim();
   const normalizedSummary = summaryBase.replace(/\s+/g, ' ');
   const sender = entry.fromLine ? entry.fromLine.trim() : '';
   const context = sender ? `${normalizedSummary} from ${sender}` : normalizedSummary;
   const hasNextStep = entry.nextStep && entry.nextStep.toLowerCase() !== 'no action';
   const action = hasNextStep ? entry.nextStep!.trim() : '';
-  const next = hasNextStep ? `Want me to ${action}?` : randomSuggestion();
-  return `Heads up: looks like ${context}. ${next}`;
+  const suggestedAction = normalizeAction(actionFromNextStep(entry.nextStep)) || 'more_info';
+  const next = hasNextStep
+    ? `I’d log a quick task for "${action}" so it doesn’t slip. Want me to do that?`
+    : randomSuggestion(suggestedAction);
+  return { prompt: `Heads up: looks like ${context}. ${next}`, suggestedAction };
 }
 
-function randomSuggestion() {
+function randomSuggestion(action: SuggestedAction) {
+  if (action === 'archive') return 'Looks wrapped up—want me to archive it and keep you moving?';
+  if (action === 'skip') return 'We can park this and move to the next email if you want.';
+  if (action === 'create_task') return 'Want me to turn this into a task so it’s on your list?';
   return FALLBACK_SUGGESTIONS[Math.floor(Math.random() * FALLBACK_SUGGESTIONS.length)];
 }
 
@@ -163,4 +183,33 @@ function createPrimerLogger(traceId?: string) {
 
 function elapsedMs(start: number) {
   return Math.round((performance.now() - start) * 10) / 10;
+}
+
+function normalizeAction(value: unknown): SuggestedAction | null {
+  const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip') return val;
+  return null;
+}
+
+function guessAction(entry: { summary?: string; nextStep?: string }): SuggestedAction {
+  const inferred = normalizeAction(actionFromNextStep(entry.nextStep));
+  if (inferred) return inferred;
+  const text = `${entry.summary || ''}`.toLowerCase();
+  if (text.includes('schedule') || text.includes('follow up') || text.includes('deadline') || text.includes('due')) {
+    return 'create_task';
+  }
+  if (text.includes('fyi') || text.includes('newsletter') || text.includes('update')) {
+    return 'skip';
+  }
+  return 'more_info';
+}
+
+function actionFromNextStep(nextStep?: string | null): SuggestedAction | null {
+  const normalized = (nextStep || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.includes('archive')) return 'archive';
+  if (normalized.includes('task') || normalized.includes('remind') || normalized.includes('follow up') || normalized.includes('todo')) {
+    return 'create_task';
+  }
+  return null;
 }

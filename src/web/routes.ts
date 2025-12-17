@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
-import { generateChatPrimers, type ChatPrimerInput } from '../llm/chatPrimer.js';
+import { generateChatPrimers, type ChatPrimerInput, type PrimerOutput, type SuggestedAction } from '../llm/chatPrimer.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
@@ -18,8 +18,8 @@ import { createGoogleTask } from '../tasks/createTask.js';
 export const router = Router();
 const PAGE_SIZE = 20;
 const PRIMER_BACKGROUND_BATCH = 6;
-const primerCache = new Map<string, string>();
-const primerPending = new Map<string, Promise<string>>();
+const primerCache = new Map<string, PrimerOutput>();
+const primerPending = new Map<string, Promise<PrimerOutput>>();
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
@@ -81,7 +81,7 @@ type PageMeta = {
 };
 
 type SummaryWithThread = Summary & { Thread: Thread | null };
-type DecoratedSummary = SummaryWithThread & { chatPrimer?: string };
+type DecoratedSummary = SummaryWithThread & { chatPrimer?: string; chatSuggestedAction?: SuggestedAction };
 type ThreadContext = { summary: SummaryWithThread; transcript: string; participants: string[] };
 
 router.get('/dashboard', async (req: Request, res: Response) => {
@@ -290,14 +290,14 @@ router.get('/secretary/primer/:threadId', async (req: Request, res: Response) =>
 
   const cached = getCachedPrimer(userId, threadId);
   if (cached) {
-    return res.json({ primer: cached, status: 'ready' });
+    return res.json({ primer: cached.prompt, suggestedAction: cached.suggestedAction, status: 'ready' });
   }
 
   const pending = primerPending.get(primerCacheKey(userId, threadId));
   if (pending) {
-    const primer = await pending.catch(() => '');
-    if (primer) return res.json({ primer, status: 'ready' });
-    return res.status(202).json({ primer: '', status: 'pending' });
+    const primer = await pending.catch(() => null);
+    if (primer?.prompt) return res.json({ primer: primer.prompt, suggestedAction: primer.suggestedAction, status: 'ready' });
+    return res.status(202).json({ primer: '', suggestedAction: '', status: 'pending' });
   }
 
   const summary = await prisma.summary.findFirst({
@@ -309,10 +309,10 @@ router.get('/secretary/primer/:threadId', async (req: Request, res: Response) =>
   const traceId = createTraceId();
   const input = buildPrimerInputFromSummary(summary as SummaryWithThread);
   const primer = await fetchPrimerForThread(userId, input, traceId);
-  if (primer) {
-    return res.json({ primer, status: 'ready' });
+  if (primer?.prompt) {
+    return res.json({ primer: primer.prompt, suggestedAction: primer.suggestedAction, status: 'ready' });
   }
-  return res.status(202).json({ primer: '', status: 'pending' });
+  return res.status(202).json({ primer: '', suggestedAction: '', status: 'pending' });
 });
 
 router.get('/api/threads', async (req: Request, res: Response) => {
@@ -497,10 +497,14 @@ async function loadPageWithOpts(userId: string, requestedPage: number, opts: { a
 }
 
 function decorateSummariesWithPrimers(userId: string, items: SummaryWithThread[]): DecoratedSummary[] {
-  return items.map(item => ({
-    ...item,
-    chatPrimer: getCachedPrimer(userId, item.threadId) || ''
-  }));
+  return items.map(item => {
+    const cached = getCachedPrimer(userId, item.threadId);
+    return {
+      ...item,
+      chatPrimer: cached?.prompt || '',
+      chatSuggestedAction: cached?.suggestedAction
+    };
+  });
 }
 
 function summariesToThreads(items: DecoratedSummary[]): SecretaryEmail[] {
@@ -516,6 +520,7 @@ function summariesToThreads(items: DecoratedSummary[]): SecretaryEmail[] {
       nextStep: x.nextStep || '',
       link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : '',
       primer: x.chatPrimer || '',
+      suggestedAction: x.chatSuggestedAction || '',
       category: x.category || '',
       receivedAt: emailTs.toISOString(),
       convo: x.convoText || ''
@@ -546,6 +551,7 @@ type SecretaryEmail = {
   nextStep: string;
   link: string;
   primer: string;
+  suggestedAction: SuggestedAction | '';
   category: string;
   receivedAt: string;
   convo: string;
@@ -699,7 +705,7 @@ function queuePrimerPrefetch(userId: string, inputs: ChatPrimerInput[], traceId:
     for (const input of batch) {
       const key = primerCacheKey(userId, input.threadId);
       const perThread = batchPromise
-        .then(result => result[input.threadId] || '')
+        .then(result => result[input.threadId] || { prompt: '', suggestedAction: 'more_info' as SuggestedAction })
         .finally(() => primerPending.delete(key));
       primerPending.set(key, perThread);
     }
@@ -716,32 +722,32 @@ async function fetchPrimerForThread(userId: string, input: ChatPrimerInput, trac
   }
   const batchPromise = runPrimerBatch(userId, [input], traceId);
   const perThread = batchPromise
-    .then(result => result[input.threadId] || '')
+    .then(result => result[input.threadId] || { prompt: '', suggestedAction: 'more_info' as SuggestedAction })
     .finally(() => primerPending.delete(key));
   primerPending.set(key, perThread);
   return perThread;
 }
 
-function runPrimerBatch(userId: string, inputs: ChatPrimerInput[], traceId: string): Promise<Record<string, string>> {
+function runPrimerBatch(userId: string, inputs: ChatPrimerInput[], traceId: string): Promise<Record<string, PrimerOutput>> {
   const log = scopedLogger(`primerBatch:${traceId}`);
   return generateChatPrimers(inputs, { traceId }).then(result => {
     cachePrimerResults(userId, result);
     return result;
   }).catch(err => {
     log('failed to generate primers', { error: (err as Error).message || err });
-    return {} as Record<string, string>;
+    return {} as Record<string, PrimerOutput>;
   });
 }
 
-function cachePrimerResults(userId: string, primers: Record<string, string>) {
+function cachePrimerResults(userId: string, primers: Record<string, PrimerOutput>) {
   for (const [threadId, primer] of Object.entries(primers)) {
-    if (!primer) continue;
+    if (!primer?.prompt) continue;
     primerCache.set(primerCacheKey(userId, threadId), primer);
   }
 }
 
 function getCachedPrimer(userId: string, threadId: string) {
-  return primerCache.get(primerCacheKey(userId, threadId)) || '';
+  return primerCache.get(primerCacheKey(userId, threadId)) || null;
 }
 
 function shouldGeneratePrimer(userId: string, threadId: string) {

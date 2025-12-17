@@ -80,7 +80,8 @@
     autoAdvanceTimer: 0,
     prepTyping: '',
     pendingCreateThreadId: '',
-    pendingArchiveThreadId: ''
+    pendingArchiveThreadId: '',
+    pendingSuggestedActions: new Map()
   };
   const taskState = {
     open: false,
@@ -261,7 +262,8 @@
     const asked = history.filter(turn => turn.role === 'user').length;
     const pendingCreate = isCreateConfirmationPending(state.activeId);
     const pendingArchive = isArchiveConfirmationPending(state.activeId);
-    if (!pendingCreate && !pendingArchive && MAX_TURNS > 0 && asked >= MAX_TURNS) {
+    const pendingSuggested = Boolean(getPendingSuggestedAction(state.activeId));
+    if (!pendingCreate && !pendingArchive && !pendingSuggested && MAX_TURNS > 0 && asked >= MAX_TURNS) {
       setChatError('Chat limit reached for this email.');
       return;
     }
@@ -276,6 +278,10 @@
     if (submitBtn) submitBtn.disabled = true;
 
     try {
+      if (pendingSuggested) {
+        const handled = await handleSuggestedActionResponse(question);
+        if (handled) return;
+      }
       if (pendingCreate) {
         await handleCreateConfirmationResponse(question);
         return;
@@ -963,10 +969,38 @@
       nextStep: typeof raw.nextStep === 'string' ? raw.nextStep.trim() : '',
       link: typeof raw.link === 'string' ? raw.link : '',
       primer: typeof raw.primer === 'string' ? raw.primer.trim() : '',
+      suggestedAction: normalizeSuggestedAction(raw.suggestedAction) || guessSuggestedAction(raw),
       category: typeof raw.category === 'string' ? raw.category : '',
       receivedAt: typeof raw.receivedAt === 'string' ? raw.receivedAt : '',
       convo: typeof raw.convo === 'string' ? raw.convo : ''
     };
+  }
+
+  function normalizeSuggestedAction(value) {
+    const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip') return val;
+    return '';
+  }
+
+  function guessSuggestedAction(thread) {
+    const next = normalizeSuggestedAction(actionFromNextStep(thread?.nextStep));
+    if (next) return next;
+    const summary = `${thread?.summary || thread?.headline || thread?.subject || ''}`.toLowerCase();
+    if (summary.includes('deadline') || summary.includes('follow up') || summary.includes('follow-up') || summary.includes('due')) {
+      return 'create_task';
+    }
+    if (summary.includes('fyi') || summary.includes('newsletter')) return 'skip';
+    return 'more_info';
+  }
+
+  function actionFromNextStep(nextStep) {
+    const text = typeof nextStep === 'string' ? nextStep.toLowerCase() : '';
+    if (!text) return '';
+    if (text.includes('archive')) return 'archive';
+    if (text.includes('remind') || text.includes('task') || text.includes('follow up') || text.includes('follow-up')) {
+      return 'create_task';
+    }
+    return '';
   }
 
   function updateHint(threadId) {
@@ -990,11 +1024,16 @@
     const history = state.histories.get(threadId);
     if (!history.length) {
       insertThreadDivider(threadId);
-      const intro = buildIntroMessage(state.lookup.get(threadId));
+      const thread = state.lookup.get(threadId);
+      const intro = buildIntroMessage(thread);
       if (intro) {
         const turn = { role: 'assistant', content: intro };
         history.push(turn);
         state.timeline.push({ type: 'turn', threadId, turn });
+      }
+      if (thread) {
+        const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
+        if (action) setPendingSuggestedAction(threadId, action);
       }
     }
     return history;
@@ -1072,17 +1111,22 @@
     context = context || 'an email that needs your call';
     const starter = `Heads up: ${context}.`;
     const normalizedNext = (thread.nextStep || '').trim();
-    const hasNext = normalizedNext && normalizedNext.toLowerCase() !== 'no action';
-    const followUps = [
-      'Want me to draft something and send it for you?',
-      'Want me to nudge them so it moves along?',
-      'Should I remind you about it later?'
-    ];
-    const next = hasNext
-      ? `Want me to run with "${normalizedNext}"?`
-      : followUps[Math.floor(Math.random() * followUps.length)];
+    const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
+    thread.suggestedAction = action;
+    const next = formatActionNudge(action, normalizedNext);
     return `${starter} ${next}`;
   }
+
+  function formatActionNudge(action, nextStep) {
+    if (action === 'archive') return 'Looks wrapped—want me to archive it?';
+    if (action === 'skip') return 'We can park this and move to the next email if you want.';
+    if (action === 'create_task') {
+      const detail = nextStep ? ` for "${nextStep}"` : '';
+      return `I can log a quick task${detail} so it doesn’t slip. Want that?`;
+    }
+    return 'Want me to pull a tighter rundown or key deadlines?';
+  }
+
 
   function ensurePrimerFetch(threadId) {
     const thread = state.lookup.get(threadId);
@@ -1111,6 +1155,7 @@
       if (!resp.ok) throw new Error('Unable to load primer');
       const data = await resp.json().catch(() => ({}));
       const primer = typeof data?.primer === 'string' ? data.primer.trim() : '';
+      const suggestedAction = normalizeSuggestedAction(data?.suggestedAction);
       if (!primer) {
         if (nextAttempt >= MAX_PRIMER_POLLS) {
           setPrimerStatus(threadId, 'error');
@@ -1120,7 +1165,7 @@
         schedulePrimerRetry(threadId, nextAttempt + 1);
         return;
       }
-      applyPrimerToThread(threadId, primer);
+      applyPrimerToThread(threadId, primer, suggestedAction);
     }).catch(() => {
       if (nextAttempt >= MAX_PRIMER_POLLS) {
         setPrimerStatus(threadId, 'error');
@@ -1164,6 +1209,8 @@
           const turn = { role: 'assistant', content: intro };
           state.histories.set(threadId, [turn]);
           state.timeline.push({ type: 'turn', threadId, turn });
+          const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
+          if (action) setPendingSuggestedAction(threadId, action);
         }
       }
       if (threadId === state.activeId) renderChat(threadId);
@@ -1188,10 +1235,13 @@
     }
   }
 
-  function applyPrimerToThread(threadId, primer) {
+  function applyPrimerToThread(threadId, primer, suggestedAction) {
     clearPrimerRetry(threadId);
     const thread = state.lookup.get(threadId);
     if (!thread) return;
+    const action = normalizeSuggestedAction(suggestedAction) || thread.suggestedAction || guessSuggestedAction(thread);
+    thread.suggestedAction = action;
+    setPendingSuggestedAction(threadId, action);
     thread.primer = primer;
     const history = state.histories.get(threadId);
     if (history && history.length && history[0]?.role === 'assistant') {
@@ -1314,6 +1364,22 @@
         closeTaskPanel(true);
       }
     }
+  }
+
+  function setPendingSuggestedAction(threadId, action) {
+    const normalized = normalizeSuggestedAction(action);
+    if (!threadId || !normalized) return;
+    state.pendingSuggestedActions.set(threadId, normalized);
+  }
+
+  function clearPendingSuggestedAction(threadId = state.activeId) {
+    if (!threadId) return;
+    state.pendingSuggestedActions.delete(threadId);
+  }
+
+  function getPendingSuggestedAction(threadId = state.activeId) {
+    if (!threadId) return '';
+    return state.pendingSuggestedActions.get(threadId) || '';
   }
 
   function setPendingCreate(threadId) {
@@ -1448,6 +1514,7 @@
     updateQueuePill();
     closeTaskPanel(true);
     hideMoreMenu();
+    clearPendingSuggestedAction(threadId);
 
     if (!state.needs.length) {
       const message = state.hasMore
@@ -1473,6 +1540,7 @@
     updateQueuePill();
     closeTaskPanel(true);
     hideMoreMenu();
+    clearPendingSuggestedAction(threadId);
     if (!hasRoomToAdvance) return;
     const nextIndex = index === -1 ? 0 : (index + 1) % state.needs.length;
     const nextId = state.needs[nextIndex] || state.needs[0];
@@ -1545,6 +1613,66 @@
     renderChat();
     updateHint(state.activeId);
   }
+
+  async function handleMoreInfoIntent() {
+    await requestReview();
+  }
+
+  async function handleSuggestedActionResponse(userText) {
+    if (!state.activeId) return false;
+    const action = getPendingSuggestedAction(state.activeId);
+    if (!action) return false;
+    const normalized = (userText || '').trim().toLowerCase();
+
+    if (isAffirmativeResponse(normalized)) {
+      clearPendingSuggestedAction(state.activeId);
+      if (action === 'archive') {
+        await handleArchiveIntent(userText, { alreadyLogged: true });
+        return true;
+      }
+      if (action === 'skip') {
+        handleAutoIntent('skip', userText, { alreadyLogged: true });
+        return true;
+      }
+      if (action === 'create_task') {
+        handleCreateTaskIntent();
+        return true;
+      }
+      if (action === 'more_info') {
+        await handleMoreInfoIntent();
+        return true;
+      }
+    }
+
+    if (isNegativeResponse(normalized)) {
+      clearPendingSuggestedAction(state.activeId);
+      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, I’ll hold off. Tell me what you’d like me to do instead.' });
+      renderChat();
+      return true;
+    }
+
+    const intent = await detectIntent(userText);
+    if (intent === 'archive') {
+      clearPendingSuggestedAction(state.activeId);
+      await handleArchiveIntent(userText, { alreadyLogged: true });
+      return true;
+    }
+    if (intent === 'skip') {
+      clearPendingSuggestedAction(state.activeId);
+      handleAutoIntent('skip', userText, { alreadyLogged: true });
+      return true;
+    }
+    if (intent === 'create_task') {
+      clearPendingSuggestedAction(state.activeId);
+      handleCreateTaskIntent();
+      return true;
+    }
+
+    // User asked something else — clear pending and let normal flow handle it.
+    clearPendingSuggestedAction(state.activeId);
+    return false;
+  }
+
 
   async function handleCreateConfirmationResponse(userText) {
     if (!state.activeId || !isCreateConfirmationPending(state.activeId)) return;
