@@ -55,6 +55,7 @@
     positions: new Map(),
     needs: [],
     histories: new Map(),
+    timeline: [],
     activeId: '',
     typing: false,
     totalLoaded: threads.length,
@@ -211,8 +212,8 @@
     }
     setChatError('');
 
-    history.push({ role: 'user', content: question });
-    renderChat(state.activeId);
+    appendTurn(state.activeId, { role: 'user', content: question });
+    renderChat();
     refs.chatInput.value = '';
     toggleComposer(false);
     setAssistantTyping(true);
@@ -248,17 +249,17 @@
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        history.pop();
-        renderChat(state.activeId);
+        popLastTurn(state.activeId);
+        renderChat();
         setChatError(data?.error || 'Something went wrong. Try again.');
         refs.chatInput.value = question;
         return;
       }
-      history.push({ role: 'assistant', content: data.reply || 'No response received.' });
-      renderChat(state.activeId);
+      appendTurn(state.activeId, { role: 'assistant', content: data.reply || 'No response received.' });
+      renderChat();
     } catch (err) {
-      history.pop();
-      renderChat(state.activeId);
+      popLastTurn(state.activeId);
+      renderChat();
       setChatError('Unable to reach the assistant. Check your connection.');
       refs.chatInput.value = question;
     } finally {
@@ -546,12 +547,59 @@
     }
     const history = state.histories.get(threadId);
     if (!history.length) {
+      insertThreadDivider(threadId);
       const intro = buildIntroMessage(state.lookup.get(threadId));
       if (intro) {
-        history.push({ role: 'assistant', content: intro });
+        const turn = { role: 'assistant', content: intro };
+        history.push(turn);
+        state.timeline.push({ type: 'turn', threadId, turn });
       }
     }
     return history;
+  }
+
+  function appendTurn(threadId, turn) {
+    const history = ensureHistory(threadId);
+    history.push(turn);
+    state.timeline.push({ type: 'turn', threadId, turn });
+    return history;
+  }
+
+  function popLastTurn(threadId) {
+    const history = state.histories.get(threadId);
+    if (!history?.length) return null;
+    const removed = history.pop();
+    if (!removed) return null;
+    for (let i = state.timeline.length - 1; i >= 0; i--) {
+      const item = state.timeline[i];
+      if (item.type === 'turn' && item.threadId === threadId && item.turn === removed) {
+        state.timeline.splice(i, 1);
+        break;
+      }
+    }
+    return removed;
+  }
+
+  function insertThreadDivider(threadId) {
+    const thread = state.lookup.get(threadId);
+    if (!thread) return;
+    const alreadyInserted = state.timeline.some(item => item.type === 'divider' && item.threadId === threadId);
+    if (alreadyInserted) return;
+    const sender = thread.from ? thread.from.split('<')[0].trim() || thread.from : '';
+    const subject = (thread.subject || '').trim() || '(no subject)';
+    const labelParts = [];
+    if (sender) labelParts.push(sender);
+    labelParts.push(subject);
+    const label = labelParts.join(' — ');
+    state.timeline.push({
+      type: 'divider',
+      threadId,
+      label,
+      subject,
+      sender,
+      receivedAt: thread.receivedAt || '',
+      link: thread.link || ''
+    });
   }
 
   function buildIntroMessage(thread) {
@@ -670,7 +718,10 @@
       if (thread && status !== 'loading' && status !== 'pending') {
         const intro = buildIntroMessage(thread);
         if (intro) {
-          state.histories.set(threadId, [{ role: 'assistant', content: intro }]);
+          insertThreadDivider(threadId);
+          const turn = { role: 'assistant', content: intro };
+          state.histories.set(threadId, [turn]);
+          state.timeline.push({ type: 'turn', threadId, turn });
         }
       }
       if (threadId === state.activeId) renderChat(threadId);
@@ -704,7 +755,10 @@
     if (history && history.length && history[0]?.role === 'assistant') {
       history[0].content = primer;
     } else {
-      state.histories.set(threadId, [{ role: 'assistant', content: primer }]);
+      insertThreadDivider(threadId);
+      const turn = { role: 'assistant', content: primer };
+      state.histories.set(threadId, [turn]);
+      state.timeline.push({ type: 'turn', threadId, turn });
     }
     setPrimerStatus(threadId, 'ready');
     if (state.prepTyping === threadId) {
@@ -715,10 +769,10 @@
     }
   }
 
-  function renderChat(threadId) {
+  function renderChat(threadId = state.activeId) {
     if (!refs.chatLog) return;
-    const history = ensureHistory(threadId);
-    if (!history.length) {
+    const timeline = state.timeline;
+    if (!timeline.length) {
       const showTyping = (state.typing && threadId === state.activeId) || state.prepTyping === threadId;
       let view = showTyping ? '' : chatPlaceholder();
       if (showTyping) {
@@ -727,7 +781,34 @@
       refs.chatLog.innerHTML = view;
       return;
     }
-    let markup = history.map(turn => {
+    let markup = timeline.map(entry => {
+      if (entry.type === 'divider') {
+        const label = htmlEscape(entry.label || 'New email thread');
+        const sender = htmlEscape(entry.sender || '');
+        const subject = htmlEscape(entry.subject || '');
+        const timestamp = entry.receivedAt ? formatTimestamp(entry.receivedAt) : '';
+        const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
+        const initials = initialsFromSender(entry.sender || entry.label || '');
+        const link = entry.link ? escapeAttribute(entry.link) : '';
+        const linkHtml = link
+          ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
+          : '';
+        return `
+          <div class="chat-divider">
+            <span class="chat-divider-line" aria-hidden="true"></span>
+            <div class="chat-divider-card">
+              <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
+              <div class="chat-divider-content">
+                <p class="chat-divider-meta">${meta}</p>
+                <p class="chat-divider-subject">${subject || label}</p>
+                ${linkHtml}
+              </div>
+            </div>
+            <span class="chat-divider-line" aria-hidden="true"></span>
+          </div>
+        `;
+      }
+      const turn = entry.turn;
       if (turn.role === 'assistant') {
         return `<div class="chat-message assistant"><div class="chat-card">${renderAssistantMarkdown(turn.content)}</div></div>`;
       }
@@ -811,8 +892,8 @@
       return;
     }
     setChatError('');
-    history.push({ role: 'user', content: REVIEW_PROMPT });
-    renderChat(threadId);
+    appendTurn(threadId, { role: 'user', content: REVIEW_PROMPT });
+    renderChat();
     toggleComposer(false);
     setAssistantTyping(true);
     const restore = withButtonBusy(refs.reviewBtn, 'Getting details…');
@@ -828,14 +909,14 @@
       if (!resp.ok) {
         const last = history[history.length - 1];
         if (last?.role === 'user' && last.content === REVIEW_PROMPT) {
-          history.pop();
-          renderChat(threadId);
+          popLastTurn(threadId);
+          renderChat();
         }
         throw new Error(data?.error || 'Unable to review this email.');
       }
       const reply = typeof data?.review === 'string' ? data.review.trim() : '';
-      history.push({ role: 'assistant', content: reply || 'Here’s what I could pull together.' });
-      renderChat(threadId);
+      appendTurn(threadId, { role: 'assistant', content: reply || 'Here’s what I could pull together.' });
+      renderChat();
       updateHint(threadId);
     } catch (err) {
       console.error('Review request failed', err);
@@ -921,12 +1002,12 @@
     const alreadyLogged = Boolean(options.alreadyLogged);
     const history = ensureHistory(state.activeId);
     if (!alreadyLogged) {
-      history.push({ role: 'user', content: userText });
-      renderChat(state.activeId);
+      appendTurn(state.activeId, { role: 'user', content: userText });
+      renderChat();
     }
 
-    history.push({ role: 'assistant', content: 'Skipping for now. It stays in Needs Review.' });
-    renderChat(state.activeId);
+    appendTurn(state.activeId, { role: 'assistant', content: 'Skipping for now. It stays in Needs Review.' });
+    renderChat();
     updateHint(state.activeId);
 
     clearAutoAdvance();
@@ -950,12 +1031,12 @@
     const alreadyLogged = Boolean(options.alreadyLogged);
     const history = ensureHistory(state.activeId);
     if (!alreadyLogged) {
-      history.push({ role: 'user', content: userText });
-      renderChat(state.activeId);
+      appendTurn(state.activeId, { role: 'user', content: userText });
+      renderChat();
     }
 
-    history.push({ role: 'assistant', content: 'Archiving this email in Gmail…' });
-    renderChat(state.activeId);
+    appendTurn(state.activeId, { role: 'assistant', content: 'Archiving this email in Gmail…' });
+    renderChat();
     updateHint(state.activeId);
 
     setAssistantTyping(true);
@@ -986,7 +1067,7 @@
       refs.mapToggle.setAttribute('aria-disabled', 'true');
       refs.mapToggle.disabled = true;
     }
-    refs.chatLog.innerHTML = chatPlaceholder();
+    renderChat();
     updateQueuePill();
     updateLoadMoreButtons();
   }
