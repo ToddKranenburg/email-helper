@@ -38,7 +38,19 @@
     chatHint: document.getElementById('assistant-hint'),
     reviewBtn: document.getElementById('action-review'),
     archiveBtn: document.getElementById('action-archive'),
-    skipBtn: document.getElementById('action-skip'),
+    moreBtn: document.getElementById('action-more'),
+    moreMenu: document.getElementById('more-menu'),
+    taskPanel: document.getElementById('task-panel'),
+    taskTitle: document.getElementById('task-title'),
+    taskNotes: document.getElementById('task-notes'),
+    taskDue: document.getElementById('task-due'),
+    taskError: document.getElementById('task-error'),
+    taskSuccess: document.getElementById('task-success'),
+    taskSuccessMeta: document.getElementById('task-success-meta'),
+    taskCancel: document.getElementById('task-cancel'),
+    taskSubmit: document.getElementById('task-submit'),
+    taskReset: document.getElementById('task-reset'),
+    taskClose: document.getElementById('task-close'),
     mapToggle: document.getElementById('map-toggle'),
     drawer: document.getElementById('inbox-drawer'),
     drawerClose: document.getElementById('drawer-close'),
@@ -66,6 +78,14 @@
     autoAdvanceTimer: 0,
     prepTyping: ''
   };
+  const taskState = {
+    open: false,
+    status: 'idle', // idle | submitting | success | error
+    suggested: { title: '', notes: '', due: '' },
+    values: { title: '', notes: '', due: '' },
+    error: '',
+    lastSourceId: ''
+  };
   const reviewedIds = new Set();
   const primerStatus = new Map();
   const primerRetryTimers = new Map();
@@ -84,6 +104,7 @@
   threads.forEach((thread, index) => {
     if (!thread || !thread.threadId) return;
     thread.primer = typeof thread.primer === 'string' ? thread.primer.trim() : '';
+    thread.messageId = typeof thread.messageId === 'string' ? thread.messageId.trim() : '';
     state.lookup.set(thread.threadId, thread);
     state.positions.set(thread.threadId, index);
     state.needs.push(thread.threadId);
@@ -131,8 +152,11 @@
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
     }
-    if (refs.skipBtn) {
-      refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
+    if (refs.moreBtn) {
+      refs.moreBtn.addEventListener('click', toggleMoreMenu);
+    }
+    if (refs.moreMenu) {
+      refs.moreMenu.addEventListener('click', handleMoreMenuClick);
     }
 
     if (refs.loadMoreHead) {
@@ -167,12 +191,25 @@
     document.addEventListener('click', (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
+      if (refs.moreMenu && !refs.moreMenu.classList.contains('hidden')) {
+        const inMenu = target.closest('#more-menu');
+        const toggle = target.closest('#action-more');
+        if (!inMenu && !toggle) hideMoreMenu();
+      }
       const btn = target.closest('button');
       if (!btn) return;
       if (btn.closest('#assistant-form')) return;
       if (!refs.chatInput || refs.chatInput.disabled) return;
       nudgeComposer(DEFAULT_NUDGE, { focus: false });
     });
+
+    if (refs.taskSubmit) refs.taskSubmit.addEventListener('click', submitTask);
+    if (refs.taskCancel) refs.taskCancel.addEventListener('click', () => closeTaskPanel(true));
+    if (refs.taskReset) refs.taskReset.addEventListener('click', resetTaskToSuggested);
+    if (refs.taskClose) refs.taskClose.addEventListener('click', () => closeTaskPanel(true));
+    if (refs.taskTitle) refs.taskTitle.addEventListener('input', syncTaskValues);
+    if (refs.taskNotes) refs.taskNotes.addEventListener('input', syncTaskValues);
+    if (refs.taskDue) refs.taskDue.addEventListener('input', syncTaskValues);
   }
 
   function handleDrawerClick(event) {
@@ -324,6 +361,10 @@
     state.activeId = threadId;
     const thread = state.lookup.get(threadId);
     if (!thread) return;
+    hideMoreMenu();
+    if (taskState.open && taskState.lastSourceId !== threadId) {
+      closeTaskPanel(true);
+    }
 
     refs.emailCard.classList.remove('hidden');
     refs.emailEmpty.classList.add('hidden');
@@ -333,6 +374,7 @@
     }
 
     updateEmailCard(thread);
+    refreshTaskSuggestion(thread);
     ensurePrimerFetch(threadId);
     ensureHistory(threadId);
     refreshPrepTyping(threadId);
@@ -382,6 +424,256 @@
     }
   }
 
+  function refreshTaskSuggestion(thread) {
+    if (!thread) return;
+    const suggestion = buildTaskSuggestion(thread);
+    const sameSource = taskState.lastSourceId === thread.threadId;
+    taskState.suggested = suggestion;
+    taskState.lastSourceId = thread.threadId;
+    if (!taskState.open || !sameSource) {
+      taskState.values = { ...suggestion };
+      taskState.status = 'idle';
+      taskState.error = '';
+    }
+    renderTaskPanel();
+  }
+
+  function buildTaskSuggestion(thread) {
+    const subject = thread.subject || 'Follow up';
+    const sender = thread.from || '';
+    const action = thread.nextStep || thread.headline || '';
+    const baseTitle = action ? `${action} — ${subject}` : `${subject}${sender ? ` — ${sender}` : ''}`;
+    const link = buildMessageLink(thread);
+    const summaryLines = [];
+    if (sender) summaryLines.push(`From: ${sender}`);
+    if (thread.summary) summaryLines.push(`Summary: ${thread.summary}`);
+    if (thread.nextStep) summaryLines.push(`Next step: ${thread.nextStep}`);
+    if (link) {
+      summaryLines.push(`Email: ${link}`);
+    } else if (thread.messageId) {
+      summaryLines.push(`Message ID: ${thread.messageId}`);
+    }
+    const due = suggestDueDate(thread);
+    return {
+      title: truncateText(baseTitle.trim(), 140),
+      notes: summaryLines.join('\n'),
+      due
+    };
+  }
+
+  function buildMessageLink(thread) {
+    if (thread?.messageId) {
+      return `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(thread.messageId)}`;
+    }
+    if (thread?.link) return thread.link;
+    return '';
+  }
+
+  function suggestDueDate(thread) {
+    const parts = [thread.nextStep, thread.summary, thread.headline, thread.subject].filter(Boolean);
+    const combined = parts.join(' ');
+    return extractDateFromText(combined);
+  }
+
+  function extractDateFromText(text) {
+    if (!text) return '';
+    const lower = text.toLowerCase();
+    if (lower.includes('tomorrow')) {
+      return formatDateInput(addDays(new Date(), 1));
+    }
+    if (lower.includes('today')) {
+      return formatDateInput(new Date());
+    }
+    const weekday = detectWeekday(lower);
+    if (weekday !== null) {
+      return formatDateInput(nextWeekdayDate(weekday));
+    }
+    const isoMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (isoMatch) {
+      const date = new Date(isoMatch[1]);
+      return isValidDate(date) ? formatDateInput(date) : '';
+    }
+    const slash = text.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+    if (slash) {
+      const month = Number(slash[1]) - 1;
+      const day = Number(slash[2]);
+      const year = slash[3] ? Number(slash[3].length === 2 ? `20${slash[3]}` : slash[3]) : new Date().getFullYear();
+      const parsed = new Date(year, month, day);
+      return isValidDate(parsed) ? formatDateInput(parsed) : '';
+    }
+    return '';
+  }
+
+  function detectWeekday(text) {
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    for (let i = 0; i < days.length; i++) {
+      const needle = days[i];
+      const pattern = new RegExp(`\\b(?:by|on|this|next)?\\s*${needle}\\b`, 'i');
+      if (pattern.test(text)) return i;
+    }
+    return null;
+  }
+
+  function nextWeekdayDate(targetDay) {
+    const today = new Date();
+    const result = new Date(today);
+    const delta = (targetDay - today.getDay() + 7) % 7 || 7;
+    result.setDate(today.getDate() + delta);
+    return result;
+  }
+
+  function addDays(date, days) {
+    const copy = new Date(date);
+    copy.setDate(copy.getDate() + days);
+    return copy;
+  }
+
+  function isValidDate(date) {
+    return date instanceof Date && !Number.isNaN(date.getTime());
+  }
+
+  function formatDateInput(date) {
+    if (!isValidDate(date)) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  function truncateText(text, max) {
+    if (!max || text.length <= max) return text;
+    return `${text.slice(0, max - 1)}…`;
+  }
+
+  function renderTaskPanel() {
+    if (!refs.taskPanel || !refs.taskTitle || !refs.taskNotes || !refs.taskDue) return;
+    refs.taskPanel.classList.toggle('hidden', !taskState.open);
+    refs.taskPanel.classList.toggle('loading', taskState.status === 'submitting');
+    refs.taskTitle.value = taskState.values.title || '';
+    refs.taskNotes.value = taskState.values.notes || '';
+    refs.taskDue.value = taskState.values.due || '';
+
+    const disabled = taskState.status === 'submitting';
+    refs.taskTitle.disabled = disabled;
+    refs.taskNotes.disabled = disabled;
+    refs.taskDue.disabled = disabled;
+    if (refs.taskSubmit) {
+      refs.taskSubmit.disabled = disabled;
+      refs.taskSubmit.textContent = disabled ? 'Creating…' : 'Create task';
+    }
+    if (refs.taskCancel) refs.taskCancel.disabled = disabled;
+    if (refs.taskReset) refs.taskReset.disabled = disabled;
+
+    if (refs.taskError) {
+      refs.taskError.textContent = taskState.error || '';
+      refs.taskError.classList.toggle('hidden', !taskState.error);
+    }
+    if (refs.taskSuccess && refs.taskSuccessMeta) {
+      refs.taskSuccess.classList.toggle('hidden', taskState.status !== 'success');
+      if (taskState.status !== 'success') {
+        refs.taskSuccessMeta.textContent = '';
+      }
+    }
+  }
+
+  function openTaskPanel() {
+    if (!state.activeId || !refs.taskPanel) return;
+    const thread = state.lookup.get(state.activeId);
+    if (!thread) return;
+    refreshTaskSuggestion(thread);
+    taskState.open = true;
+    taskState.status = 'idle';
+    taskState.error = '';
+    taskState.values = { ...taskState.suggested };
+    renderTaskPanel();
+    if (refs.taskTitle) refs.taskTitle.focus();
+  }
+
+  function closeTaskPanel(resetValues) {
+    if (!refs.taskPanel) return;
+    taskState.open = false;
+    if (resetValues) {
+      taskState.status = 'idle';
+      taskState.error = '';
+      taskState.values = { ...taskState.suggested };
+    }
+    renderTaskPanel();
+  }
+
+  function syncTaskValues() {
+    if (!refs.taskTitle || !refs.taskNotes || !refs.taskDue) return;
+    taskState.values = {
+      title: refs.taskTitle.value,
+      notes: refs.taskNotes.value,
+      due: refs.taskDue.value
+    };
+    taskState.error = '';
+    if (refs.taskError) refs.taskError.classList.add('hidden');
+  }
+
+  function resetTaskToSuggested() {
+    taskState.values = { ...taskState.suggested };
+    taskState.status = 'idle';
+    taskState.error = '';
+    renderTaskPanel();
+  }
+
+  async function submitTask() {
+    if (!state.activeId || !refs.taskSubmit) return;
+    const thread = state.lookup.get(state.activeId);
+    if (!thread) return;
+    const title = (taskState.values.title || '').trim();
+    if (!title) {
+      taskState.error = 'Add a task title before saving.';
+      taskState.status = 'error';
+      renderTaskPanel();
+      return;
+    }
+    taskState.error = '';
+    taskState.status = 'submitting';
+    renderTaskPanel();
+    try {
+      const resp = await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          threadId: thread.threadId,
+          messageId: thread.messageId || '',
+          title,
+          notes: taskState.values.notes || '',
+          due: taskState.values.due || ''
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to create that task.');
+      }
+      const dueRaw = typeof data?.due === 'string' ? data.due : taskState.values.due;
+      const friendlyDue = formatFriendlyDate(dueRaw);
+      const finalTitle = typeof data?.title === 'string' && data.title.trim() ? data.title : title;
+      taskState.status = 'success';
+      taskState.error = '';
+      if (refs.taskSuccessMeta) {
+        const bits = [finalTitle];
+        if (friendlyDue) bits.push(`Due ${friendlyDue}`);
+        refs.taskSuccessMeta.textContent = bits.join(' • ');
+      }
+    } catch (err) {
+      taskState.status = 'error';
+      taskState.error = err instanceof Error ? err.message : 'Unable to create that task.';
+    } finally {
+      renderTaskPanel();
+    }
+  }
+
+  function formatFriendlyDate(raw) {
+    if (!raw) return '';
+    const parsed = new Date(raw);
+    if (!isValidDate(parsed)) return '';
+    return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
   function updateHeaderCount() {
     if (!refs.count) return;
     const loaded = getLoadedCount();
@@ -426,6 +718,39 @@
         refs.loadMoreEmpty.disabled = true;
         refs.loadMoreEmpty.textContent = 'All emails loaded';
       }
+    }
+  }
+
+  function toggleMoreMenu(event) {
+    if (event) event.preventDefault();
+    if (!refs.moreMenu || !refs.moreBtn || !state.activeId) return;
+    const isOpen = !refs.moreMenu.classList.contains('hidden');
+    if (isOpen) {
+      hideMoreMenu();
+      return;
+    }
+    refs.moreMenu.classList.remove('hidden');
+    refs.moreBtn.setAttribute('aria-expanded', 'true');
+  }
+
+  function hideMoreMenu() {
+    if (!refs.moreMenu || !refs.moreBtn) return;
+    refs.moreMenu.classList.add('hidden');
+    refs.moreBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  function handleMoreMenuClick(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const action = target.closest('button')?.dataset?.action;
+    if (!action) return;
+    event.preventDefault();
+    hideMoreMenu();
+    if (action === 'task') {
+      openTaskPanel();
+    }
+    if (action === 'skip') {
+      skipCurrent('menu');
     }
   }
 
@@ -514,6 +839,7 @@
     if (!threadId) return null;
     return {
       threadId,
+      messageId: typeof raw.messageId === 'string' ? raw.messageId.trim() : '',
       headline: typeof raw.headline === 'string' ? raw.headline.trim() : '',
       from: typeof raw.from === 'string' ? raw.from.trim() : '',
       subject: typeof raw.subject === 'string' ? raw.subject.trim() : '(no subject)',
@@ -530,7 +856,7 @@
   function updateHint(threadId) {
     if (!refs.chatHint) return;
     if (!MAX_TURNS || !threadId) {
-      refs.chatHint.textContent = 'Ask anything or tap Archive / Skip.';
+      refs.chatHint.textContent = 'Ask anything or tap Archive / More actions.';
       return;
     }
     const history = ensureHistory(threadId);
@@ -863,8 +1189,12 @@
     refs.chatInput.disabled = !enabled || !state.activeId;
     if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
-    if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
-    if (!enabled) clearComposerNudge();
+    if (refs.moreBtn) refs.moreBtn.disabled = !enabled || !state.activeId;
+    if (!enabled) {
+      clearComposerNudge();
+      hideMoreMenu();
+      closeTaskPanel(true);
+    }
   }
 
   function setAssistantTyping(value) {
@@ -969,6 +1299,8 @@
     updateDrawerLists();
     updateHeaderCount();
     updateQueuePill();
+    closeTaskPanel(true);
+    hideMoreMenu();
 
     if (!state.needs.length) {
       const message = state.hasMore
@@ -993,6 +1325,8 @@
     state.needs.push(threadId);
     markReviewed(threadId);
     updateDrawerLists();
+    closeTaskPanel(true);
+    hideMoreMenu();
     const nextId = state.needs[index] || state.needs[0];
     setActiveThread(nextId);
   }
@@ -1052,6 +1386,8 @@
       ? 'You reviewed everything loaded. Tap Load more to keep going.'
       : 'All emails reviewed. Nice work.';
     const copy = message || fallback;
+    closeTaskPanel(true);
+    hideMoreMenu();
     state.activeId = '';
     refs.emailCard.classList.add('hidden');
     refs.emailEmpty.classList.remove('hidden');

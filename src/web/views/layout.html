@@ -410,9 +410,46 @@
       color: #27336a;
       border: 1px solid #d7ddff;
     }
-    .triage-btn.skip {
+    .triage-more {
+      position: relative;
+      flex: 1;
+    }
+    .triage-btn.more {
       background: #f0f0f4;
       color: #3b3a4f;
+      border: 1px solid #e3e2ee;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+    }
+    .more-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      background: #fff;
+      border: 1px solid var(--border);
+      box-shadow: 0 18px 40px rgba(15,16,32,0.12);
+      border-radius: 12px;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 170px;
+      z-index: 5;
+    }
+    .more-menu button {
+      border: none;
+      background: transparent;
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-weight: 600;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .more-menu button:hover {
+      background: #f5f6fb;
     }
     .assistant-input {
       display: flex;
@@ -470,6 +507,136 @@
       color: var(--muted);
       flex-wrap: wrap;
       gap: 8px;
+    }
+    .task-panel {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: 0 12px 32px rgba(15,16,32,0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .task-panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .task-panel-label {
+      margin: 0;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .task-panel-helper {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .task-close {
+      border: none;
+      background: #f5f5fb;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #3b3a4f;
+    }
+    .task-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .task-field label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .task-field input,
+    .task-field textarea {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 15px;
+      background: #fff;
+    }
+    .task-field textarea {
+      min-height: 72px;
+      resize: vertical;
+    }
+    .task-error {
+      margin: 0;
+      color: #d64545;
+      font-weight: 600;
+    }
+    .task-success {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      background: #eef8f0;
+      border: 1px solid #c8e6cc;
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .task-success-title {
+      margin: 0;
+      font-weight: 700;
+    }
+    .task-success-meta {
+      margin: 2px 0 0;
+      color: #2b5930;
+      font-size: 13px;
+    }
+    .task-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .task-actions-right {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .task-submit {
+      background: var(--text);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .task-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .task-cancel,
+    .task-reset {
+      border: 1px solid var(--border);
+      background: #f7f7fb;
+      color: #3b3a4f;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .task-reset {
+      background: #fff;
+    }
+    .task-cancel:disabled,
+    .task-reset:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .task-panel.loading input,
+    .task-panel.loading textarea,
+    .task-panel.loading button {
+      pointer-events: none;
+      opacity: 0.7;
     }
     .chat-error {
       color: #d64545;

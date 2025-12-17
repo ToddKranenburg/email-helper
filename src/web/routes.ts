@@ -13,6 +13,7 @@ import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
 import type { Summary, Thread } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
+import { createGoogleTask } from '../tasks/createTask.js';
 
 export const router = Router();
 const PAGE_SIZE = 20;
@@ -399,6 +400,53 @@ router.post('/api/archive', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/api/tasks', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId.trim() : '';
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+  const due = typeof req.body?.due === 'string' ? req.body.due.trim() : '';
+
+  if (!title) return res.status(400).json({ error: 'Add a task title before saving.' });
+  if (!threadId && !messageId) {
+    return res.status(400).json({ error: 'Missing email identifier for this task.' });
+  }
+
+  const summary = await prisma.summary.findFirst({
+    where: {
+      userId: sessionData.user.id,
+      ...(messageId ? { lastMsgId: messageId } : {}),
+      ...(threadId ? { threadId } : {})
+    }
+  });
+  if (!summary) {
+    return res.status(404).json({ error: 'Email not found in your queue.' });
+  }
+
+  try {
+    const auth = getAuthedClient(sessionData);
+    const task = await createGoogleTask(auth, { title, notes, due });
+    return res.json({
+      status: 'created',
+      taskId: task.id,
+      due: task.due ?? null,
+      title: task.title ?? title
+    });
+  } catch (err) {
+    const gaxios = err instanceof GaxiosError ? err : undefined;
+    const reason = gaxios?.response?.status === 403
+      ? 'Google Tasks access is missing. Please reconnect Google and try again.'
+      : 'Unable to create that task right now. Please try again.';
+    console.error('Failed to create Google Task', err);
+    return res.status(500).json({ error: reason });
+  }
+});
+
 async function loadPage(userId: string, requestedPage: number, opts: { assumeMore?: boolean } = {}) {
   return loadPageWithOpts(userId, requestedPage, opts);
 }
@@ -439,6 +487,7 @@ function summariesToThreads(items: DecoratedSummary[]): SecretaryEmail[] {
     const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
     return {
       threadId: x.threadId,
+      messageId: x.lastMsgId || '',
       headline: x.headline || '',
       from: formatSender(x.Thread),
       subject: x.Thread?.subject || '(no subject)',
@@ -468,6 +517,7 @@ function emojiForCategory(cat: string): string {
 
 type SecretaryEmail = {
   threadId: string;
+  messageId: string;
   headline: string;
   from: string;
   subject: string;

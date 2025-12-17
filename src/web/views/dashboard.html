@@ -59,8 +59,50 @@
         <div class="triage-actions">
           <button class="triage-btn review" id="action-review" type="button">👀 More info</button>
           <button class="triage-btn archive" id="action-archive" type="button">Archive in Gmail</button>
-          <button class="triage-btn skip" id="action-skip" type="button">➡️ Skip</button>
+          <div class="triage-more">
+            <button class="triage-btn more" id="action-more" type="button" aria-haspopup="true" aria-expanded="false">▾ More actions</button>
+            <div class="more-menu hidden" id="more-menu" role="menu">
+              <button type="button" data-action="task">Create task</button>
+              <button type="button" data-action="skip">Skip</button>
+            </div>
+          </div>
         </div>
+        <section class="task-panel hidden" id="task-panel" aria-live="polite">
+          <div class="task-panel-head">
+            <div>
+              <p class="task-panel-label">📝 Create task (suggested)</p>
+              <p class="task-panel-helper" id="task-panel-helper">Edit anything before saving.</p>
+            </div>
+            <button class="task-close" id="task-close" type="button" aria-label="Close create task panel">✕</button>
+          </div>
+          <div class="task-field">
+            <label for="task-title">Task title</label>
+            <input id="task-title" type="text" autocomplete="off" />
+          </div>
+          <div class="task-field">
+            <label for="task-notes">Details / notes</label>
+            <textarea id="task-notes" rows="3"></textarea>
+          </div>
+          <div class="task-field">
+            <label for="task-due">Due date (optional)</label>
+            <input id="task-due" type="date" placeholder="No due date" />
+          </div>
+          <p class="task-error hidden" id="task-error" role="alert"></p>
+          <div class="task-success hidden" id="task-success">
+            <div class="task-success-icon">✅</div>
+            <div class="task-success-copy">
+              <p class="task-success-title">Task created</p>
+              <p class="task-success-meta" id="task-success-meta"></p>
+            </div>
+          </div>
+          <div class="task-actions">
+            <button class="task-reset" id="task-reset" type="button">Reset to suggested</button>
+            <div class="task-actions-right">
+              <button class="task-cancel" id="task-cancel" type="button">Cancel</button>
+              <button class="task-submit" id="task-submit" type="button">Create task</button>
+            </div>
+          </div>
+        </section>
         <div class="assistant-meta">
           <span id="assistant-hint">Ask up to 20 questions per email.</span>
           <span class="chat-error hidden" id="assistant-error"></span>
