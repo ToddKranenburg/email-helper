@@ -56,7 +56,8 @@
     drawer: document.getElementById('inbox-drawer'),
     drawerClose: document.getElementById('drawer-close'),
     needsList: document.getElementById('needs-list'),
-    needsCount: document.getElementById('needs-count')
+    needsCount: document.getElementById('needs-count'),
+    reviewList: document.getElementById('review-list')
   };
 
   if (!refs.chatLog || !refs.chatForm || !refs.emailCard || !refs.emailEmpty) {
@@ -188,8 +189,9 @@
           toggleDrawer(false);
         }
       });
-      if (refs.needsList) refs.needsList.addEventListener('click', handleDrawerClick);
+      if (refs.needsList) refs.needsList.addEventListener('click', (event) => handleThreadListClick(event, 'drawer'));
     }
+    if (refs.reviewList) refs.reviewList.addEventListener('click', (event) => handleThreadListClick(event, 'queue'));
 
     document.addEventListener('click', (event) => {
       const target = event.target;
@@ -223,17 +225,20 @@
     if (refs.taskDue) refs.taskDue.addEventListener('input', syncTaskValues);
   }
 
-  function handleDrawerClick(event) {
-    const loadMoreBtn = event.target.closest('.load-more');
+  function handleThreadListClick(event, variant) {
+    const targetEl = event.target;
+    if (!(targetEl instanceof Element)) return;
+    const loadMoreBtn = targetEl.closest('.load-more');
     if (loadMoreBtn) {
       fetchNextPage('button');
       return;
     }
-    const target = event.target.closest('.drawer-thread');
+    const selector = variant === 'queue' ? '.queue-item' : '.drawer-thread';
+    const target = targetEl.closest(selector);
     if (!target) return;
     const threadId = target.dataset.threadId;
     if (!threadId || !state.lookup.has(threadId)) return;
-    toggleDrawer(false);
+    if (variant === 'drawer') toggleDrawer(false);
     setActiveThread(threadId);
   }
 
@@ -875,39 +880,56 @@
   }
 
   function updateDrawerLists() {
-    if (!refs.needsList) return;
-    refs.needsList.innerHTML = '';
+    renderThreadList(refs.needsList, 'drawer');
+    renderThreadList(refs.reviewList, 'queue');
+    if (refs.needsCount) refs.needsCount.textContent = state.hasMore ? `${state.needs.length}+` : String(state.needs.length);
+  }
+
+  function renderThreadList(listEl, variant = 'drawer') {
+    if (!listEl) return;
+    listEl.innerHTML = '';
 
     if (state.needs.length) {
-      state.needs.forEach(id => appendDrawerItem(refs.needsList, id));
+      state.needs.forEach(id => appendThreadItem(listEl, id, variant));
     } else {
-      refs.needsList.innerHTML = '<li class="drawer-empty">Nothing queued up.</li>';
+      const li = document.createElement('li');
+      li.className = variant === 'queue' ? 'queue-empty drawer-empty' : 'drawer-empty';
+      li.textContent = 'Nothing queued up.';
+      listEl.appendChild(li);
     }
+
     if (state.hasMore) {
       const li = document.createElement('li');
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'drawer-thread load-more';
+      btn.className = buildThreadClass(variant, { loadMore: true });
       btn.textContent = state.loadingMore ? 'Loading…' : 'Load more';
       btn.disabled = state.loadingMore;
       li.appendChild(btn);
-      refs.needsList.appendChild(li);
+      listEl.appendChild(li);
     }
-
-    if (refs.needsCount) refs.needsCount.textContent = state.hasMore ? `${state.needs.length}+` : String(state.needs.length);
   }
 
-  function appendDrawerItem(listEl, threadId) {
+  function appendThreadItem(listEl, threadId, variant) {
     const thread = state.lookup.get(threadId);
     if (!thread) return;
     const li = document.createElement('li');
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'drawer-thread' + (threadId === state.activeId ? ' active' : '');
+    btn.className = buildThreadClass(variant, { active: threadId === state.activeId });
     btn.dataset.threadId = threadId;
     btn.innerHTML = `<strong>${htmlEscape(thread.from || 'Unknown sender')}</strong><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
     li.appendChild(btn);
     listEl.appendChild(li);
+  }
+
+  function buildThreadClass(variant, options = {}) {
+    const { loadMore = false, active = false } = options;
+    const base = variant === 'queue' ? 'queue-item' : 'drawer-thread';
+    const classes = [base];
+    if (loadMore) classes.push('load-more');
+    if (active) classes.push('active');
+    return classes.join(' ');
   }
 
   function appendThreads(items) {
@@ -1440,19 +1462,20 @@
   }
 
   function skipCurrent(source) {
-    if (!state.activeId || state.needs.length <= 1) {
-      return;
-    }
+    if (!state.activeId) return;
     const threadId = state.activeId;
     const index = state.needs.indexOf(threadId);
-    if (index === -1) return;
-    state.needs.splice(index, 1);
-    state.needs.push(threadId);
+    const hasRoomToAdvance = state.needs.length > 1;
     markReviewed(threadId);
+    updateProgress();
     updateDrawerLists();
+    updateHeaderCount();
+    updateQueuePill();
     closeTaskPanel(true);
     hideMoreMenu();
-    const nextId = state.needs[index] || state.needs[0];
+    if (!hasRoomToAdvance) return;
+    const nextIndex = index === -1 ? 0 : (index + 1) % state.needs.length;
+    const nextId = state.needs[nextIndex] || state.needs[0];
     setActiveThread(nextId);
   }
 
