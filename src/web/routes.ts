@@ -431,9 +431,11 @@ router.post('/api/tasks', async (req: Request, res: Response) => {
   try {
     const auth = getAuthedClient(sessionData);
     const task = await createGoogleTask(auth, { title, notes, due });
+    const listId = extractTaskListId(task);
     return res.json({
       status: 'created',
       taskId: task.id,
+      taskUrl: buildTasksLink(task.id, listId),
       due: task.due ?? null,
       title: task.title ?? title
     });
@@ -446,6 +448,25 @@ router.post('/api/tasks', async (req: Request, res: Response) => {
     return res.status(500).json({ error: reason });
   }
 });
+
+function buildTasksLink(taskId?: string | null, listId?: string | null) {
+  if (!taskId) return '';
+  const list = listId || '@default';
+  const base = 'https://tasks.google.com/embed/';
+  const query = new URLSearchParams({
+    list,
+    task: taskId,
+    origin: 'https://mail.google.com'
+  });
+  return `${base}?${query.toString()}`;
+}
+
+function extractTaskListId(task: { selfLink?: string | null }) {
+  const selfLink = typeof task?.selfLink === 'string' ? task.selfLink : '';
+  if (!selfLink) return '';
+  const match = selfLink.match(/\/lists\/([^/]+)\/tasks\/[^/]+/);
+  return match?.[1] || '';
+}
 
 async function loadPage(userId: string, requestedPage: number, opts: { assumeMore?: boolean } = {}) {
   return loadPageWithOpts(userId, requestedPage, opts);

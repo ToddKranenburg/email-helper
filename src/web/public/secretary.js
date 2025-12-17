@@ -41,6 +41,7 @@
     moreBtn: document.getElementById('action-more'),
     moreMenu: document.getElementById('more-menu'),
     taskPanel: document.getElementById('task-panel'),
+    taskPanelHelper: document.getElementById('task-panel-helper'),
     taskTitle: document.getElementById('task-title'),
     taskNotes: document.getElementById('task-notes'),
     taskDue: document.getElementById('task-due'),
@@ -76,7 +77,9 @@
     nextPage: NEXT_PAGE,
     loadingMore: false,
     autoAdvanceTimer: 0,
-    prepTyping: ''
+    prepTyping: '',
+    pendingCreateThreadId: '',
+    pendingArchiveThreadId: ''
   };
   const taskState = {
     open: false,
@@ -203,7 +206,15 @@
       nudgeComposer(DEFAULT_NUDGE, { focus: false });
     });
 
-    if (refs.taskSubmit) refs.taskSubmit.addEventListener('click', submitTask);
+    if (refs.taskSubmit) {
+      refs.taskSubmit.addEventListener('click', async (event) => {
+        const result = await submitTask(event);
+        if (result?.ok) {
+          clearPendingCreate();
+          promptArchiveAfterTask(result, { includeSuccess: true });
+        }
+      });
+    }
     if (refs.taskCancel) refs.taskCancel.addEventListener('click', () => closeTaskPanel(true));
     if (refs.taskReset) refs.taskReset.addEventListener('click', resetTaskToSuggested);
     if (refs.taskClose) refs.taskClose.addEventListener('click', () => closeTaskPanel(true));
@@ -243,7 +254,9 @@
 
     const history = ensureHistory(state.activeId);
     const asked = history.filter(turn => turn.role === 'user').length;
-    if (MAX_TURNS > 0 && asked >= MAX_TURNS) {
+    const pendingCreate = isCreateConfirmationPending(state.activeId);
+    const pendingArchive = isArchiveConfirmationPending(state.activeId);
+    if (!pendingCreate && !pendingArchive && MAX_TURNS > 0 && asked >= MAX_TURNS) {
       setChatError('Chat limit reached for this email.');
       return;
     }
@@ -252,12 +265,21 @@
     appendTurn(state.activeId, { role: 'user', content: question });
     renderChat();
     refs.chatInput.value = '';
-    toggleComposer(false);
+    toggleComposer(false, { preserveTaskPanel: pendingCreate || taskState.open });
     setAssistantTyping(true);
     const submitBtn = refs.chatForm.querySelector('button[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
 
     try {
+      if (pendingCreate) {
+        await handleCreateConfirmationResponse(question);
+        return;
+      }
+      if (pendingArchive) {
+        await handleArchiveConfirmationResponse(question);
+        return;
+      }
+
       const intent = await detectIntent(question);
       if (intent === 'skip') {
         setAssistantTyping(false);
@@ -271,6 +293,13 @@
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         await handleArchiveIntent(question, { alreadyLogged: true });
+        return;
+      }
+      if (intent === 'create_task') {
+        setAssistantTyping(false);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
+        handleCreateTaskIntent();
         return;
       }
 
@@ -364,6 +393,12 @@
     hideMoreMenu();
     if (taskState.open && taskState.lastSourceId !== threadId) {
       closeTaskPanel(true);
+    }
+    if (state.pendingCreateThreadId && state.pendingCreateThreadId !== threadId) {
+      clearPendingCreate();
+    }
+    if (state.pendingArchiveThreadId && state.pendingArchiveThreadId !== threadId) {
+      clearPendingArchive();
     }
 
     refs.emailCard.classList.remove('hidden');
@@ -478,6 +513,17 @@
   function extractDateFromText(text) {
     if (!text) return '';
     const lower = text.toLowerCase();
+    const inDays = lower.match(/\bin\s+(\d+)\s+days?\b/);
+    if (inDays) {
+      const days = Number(inDays[1]);
+      if (Number.isFinite(days)) return formatDateInput(addDays(new Date(), days));
+    }
+    if (lower.includes('end of day') || lower.includes('eod')) {
+      return formatDateInput(new Date());
+    }
+    if (lower.includes('end of week') || lower.includes('by end of week') || lower.includes('this week')) {
+      return formatDateInput(nextWeekdayDate(5)); // Friday target
+    }
     if (lower.includes('tomorrow')) {
       return formatDateInput(addDays(new Date(), 1));
     }
@@ -547,7 +593,8 @@
 
   function renderTaskPanel() {
     if (!refs.taskPanel || !refs.taskTitle || !refs.taskNotes || !refs.taskDue) return;
-    refs.taskPanel.classList.toggle('hidden', !taskState.open);
+    const showPanel = taskState.open;
+    refs.taskPanel.classList.toggle('hidden', !showPanel);
     refs.taskPanel.classList.toggle('loading', taskState.status === 'submitting');
     refs.taskTitle.value = taskState.values.title || '';
     refs.taskNotes.value = taskState.values.notes || '';
@@ -574,9 +621,17 @@
         refs.taskSuccessMeta.textContent = '';
       }
     }
+    if (refs.taskPanelHelper) {
+      const pending = isCreateConfirmationPending(taskState.lastSourceId);
+      refs.taskPanelHelper.textContent = pending
+        ? 'Review and confirm in chat to create.'
+        : 'Edit anything before saving.';
+    }
   }
 
-  function openTaskPanel() {
+  function openTaskPanel(options = {}) {
+    const opts = options instanceof Event ? {} : options;
+    const preserveValues = Boolean(opts.preserveValues);
     if (!state.activeId || !refs.taskPanel) return;
     const thread = state.lookup.get(state.activeId);
     if (!thread) return;
@@ -584,7 +639,9 @@
     taskState.open = true;
     taskState.status = 'idle';
     taskState.error = '';
-    taskState.values = { ...taskState.suggested };
+    if (!preserveValues) {
+      taskState.values = { ...taskState.suggested };
+    }
     renderTaskPanel();
     if (refs.taskTitle) refs.taskTitle.focus();
   }
@@ -597,6 +654,7 @@
       taskState.error = '';
       taskState.values = { ...taskState.suggested };
     }
+    clearPendingCreate();
     renderTaskPanel();
   }
 
@@ -618,20 +676,24 @@
     renderTaskPanel();
   }
 
-  async function submitTask() {
-    if (!state.activeId || !refs.taskSubmit) return;
+  async function submitTask(arg) {
+    if (arg instanceof Event && typeof arg.preventDefault === 'function') {
+      arg.preventDefault();
+    }
+    if (!state.activeId || !refs.taskSubmit) return { ok: false, error: 'No email selected.' };
     const thread = state.lookup.get(state.activeId);
-    if (!thread) return;
+    if (!thread) return { ok: false, error: 'Email context missing.' };
     const title = (taskState.values.title || '').trim();
     if (!title) {
       taskState.error = 'Add a task title before saving.';
       taskState.status = 'error';
       renderTaskPanel();
-      return;
+      return { ok: false, error: taskState.error };
     }
     taskState.error = '';
     taskState.status = 'submitting';
     renderTaskPanel();
+    let result = { ok: false, error: '' };
     try {
       const resp = await fetch('/api/tasks', {
         method: 'POST',
@@ -652,26 +714,57 @@
       const dueRaw = typeof data?.due === 'string' ? data.due : taskState.values.due;
       const friendlyDue = formatFriendlyDate(dueRaw);
       const finalTitle = typeof data?.title === 'string' && data.title.trim() ? data.title : title;
+      const taskUrl = typeof data?.taskUrl === 'string' ? data.taskUrl : '';
       taskState.status = 'success';
       taskState.error = '';
+      taskState.open = false;
       if (refs.taskSuccessMeta) {
         const bits = [finalTitle];
         if (friendlyDue) bits.push(`Due ${friendlyDue}`);
         refs.taskSuccessMeta.textContent = bits.join(' • ');
       }
+      result = { ok: true, title: finalTitle, due: friendlyDue, url: taskUrl };
     } catch (err) {
       taskState.status = 'error';
       taskState.error = err instanceof Error ? err.message : 'Unable to create that task.';
+      result = { ok: false, error: taskState.error };
     } finally {
       renderTaskPanel();
     }
+    return result;
   }
 
   function formatFriendlyDate(raw) {
     if (!raw) return '';
-    const parsed = new Date(raw);
-    if (!isValidDate(parsed)) return '';
+    const parsed = parseDateFriendly(raw);
+    if (!parsed) return '';
     return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function parseDateFriendly(raw) {
+    if (!raw) return null;
+    const str = String(raw).trim();
+    if (!str) return null;
+    const dateOnly = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) {
+      const [, y, m, d] = dateOnly;
+      const year = Number(y);
+      const month = Number(m) - 1;
+      const day = Number(d);
+      const date = new Date(year, month, day);
+      return isValidDate(date) ? date : null;
+    }
+    const isoWithTime = str.match(/^(\d{4})-(\d{2})-(\d{2})[T\s]/);
+    if (isoWithTime) {
+      const [, y, m, d] = isoWithTime;
+      const year = Number(y);
+      const month = Number(m) - 1;
+      const day = Number(d);
+      const date = new Date(year, month, day);
+      return isValidDate(date) ? date : null;
+    }
+    const parsed = new Date(str);
+    return isValidDate(parsed) ? parsed : null;
   }
 
   function updateHeaderCount() {
@@ -747,6 +840,7 @@
     event.preventDefault();
     hideMoreMenu();
     if (action === 'task') {
+      clearPendingCreate();
       openTaskPanel();
     }
     if (action === 'skip') {
@@ -1185,7 +1279,8 @@
     }, 2600);
   }
 
-  function toggleComposer(enabled) {
+  function toggleComposer(enabled, options = {}) {
+    const preserveTaskPanel = Boolean(options.preserveTaskPanel);
     refs.chatInput.disabled = !enabled || !state.activeId;
     if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
@@ -1193,8 +1288,38 @@
     if (!enabled) {
       clearComposerNudge();
       hideMoreMenu();
-      closeTaskPanel(true);
+      if (!preserveTaskPanel) {
+        closeTaskPanel(true);
+      }
     }
+  }
+
+  function setPendingCreate(threadId) {
+    state.pendingCreateThreadId = threadId || '';
+    renderTaskPanel();
+  }
+
+  function clearPendingCreate() {
+    if (!state.pendingCreateThreadId) return;
+    state.pendingCreateThreadId = '';
+    renderTaskPanel();
+  }
+
+  function isCreateConfirmationPending(threadId = state.activeId) {
+    return Boolean(threadId && state.pendingCreateThreadId && state.pendingCreateThreadId === threadId);
+  }
+
+  function setPendingArchive(threadId) {
+    state.pendingArchiveThreadId = threadId || '';
+  }
+
+  function clearPendingArchive() {
+    if (!state.pendingArchiveThreadId) return;
+    state.pendingArchiveThreadId = '';
+  }
+
+  function isArchiveConfirmationPending(threadId = state.activeId) {
+    return Boolean(threadId && state.pendingArchiveThreadId && state.pendingArchiveThreadId === threadId);
   }
 
   function setAssistantTyping(value) {
@@ -1381,6 +1506,149 @@
     }
   }
 
+  function handleCreateTaskIntent() {
+    if (!state.activeId) return;
+    const thread = state.lookup.get(state.activeId);
+    if (!thread) return;
+    const alreadyPending = isCreateConfirmationPending(state.activeId);
+    openTaskPanel({ preserveValues: alreadyPending && taskState.open });
+    setPendingCreate(state.activeId);
+    taskState.status = 'idle';
+    taskState.error = '';
+    renderTaskPanel();
+
+    const prompt = alreadyPending ? 'Please confirm: create the task as shown? (yes/no)' : buildTaskConfirmationPrompt();
+    appendTurn(state.activeId, { role: 'assistant', content: prompt });
+    renderChat();
+    updateHint(state.activeId);
+  }
+
+  async function handleCreateConfirmationResponse(userText) {
+    if (!state.activeId || !isCreateConfirmationPending(state.activeId)) return;
+    const normalized = (userText || '').trim().toLowerCase();
+
+    if (isAffirmativeResponse(normalized)) {
+      const result = await submitTask();
+      if (result?.ok) {
+        appendTurn(state.activeId, { role: 'assistant', content: buildTaskCreatedMessage(result) });
+        clearPendingCreate();
+        promptArchiveAfterTask(result, { includeSuccess: false });
+      } else if (result?.error) {
+        appendTurn(state.activeId, { role: 'assistant', content: `Couldn't create the task: ${result.error}` });
+      }
+      renderChat();
+      return;
+    }
+
+    if (isNegativeResponse(normalized)) {
+      clearPendingCreate();
+      renderTaskPanel();
+      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, I won’t create it. Adjust the fields or ask another action.' });
+      renderChat();
+      return;
+    }
+
+    const intent = await detectIntent(userText);
+    if (intent === 'archive') {
+      clearPendingCreate();
+      closeTaskPanel(true);
+      await handleArchiveIntent(userText, { alreadyLogged: true });
+      return;
+    }
+    if (intent === 'skip') {
+      clearPendingCreate();
+      closeTaskPanel(true);
+      handleAutoIntent('skip', userText, { alreadyLogged: true });
+      return;
+    }
+
+    appendTurn(state.activeId, { role: 'assistant', content: 'Please confirm: create the task as shown? (yes/no)' });
+    renderChat();
+  }
+
+  function buildTaskConfirmationPrompt() {
+    const title = (taskState.values.title || taskState.suggested.title || 'New task').trim();
+    const friendlyDue = taskState.values.due ? formatFriendlyDate(taskState.values.due) : '';
+    const dueLabel = friendlyDue ? `due ${friendlyDue}` : 'with no due date';
+    return `I can create a task: ${title} (${dueLabel}). Create it?`;
+  }
+
+  function buildTaskCreatedMessage(result) {
+    const bits = ['✅ Task created'];
+    if (result?.title) bits.push(result.title);
+    const due = result?.due || formatFriendlyDate(taskState.values.due);
+    if (due) {
+      bits.push(`Due ${due}`);
+    } else {
+      bits.push('No due date set');
+    }
+    if (result?.url) {
+      bits.push(`[Open in Google Tasks](${result.url})`);
+    }
+    return bits.join(' — ');
+  }
+
+  function isAffirmativeResponse(text) {
+    const normalized = (text || '').trim().toLowerCase();
+    if (!normalized) return false;
+    const affirm = ['yes', 'y', 'yeah', 'yep', 'yup', 'sure', 'sure thing', 'do it', 'create it', 'confirm', 'please do', 'go for it', 'go ahead', 'sounds good', 'ok', 'okay', 'affirmative', 'absolutely'];
+    return affirm.some(word => normalized === word || normalized.startsWith(`${word},`) || normalized.startsWith(`${word} `));
+  }
+
+  function isNegativeResponse(text) {
+    const normalized = (text || '').trim().toLowerCase();
+    if (!normalized) return false;
+    const negative = ['no', 'n', 'nah', 'nope', 'not now', 'cancel', 'stop', 'hold on', 'wait', 'don’t', "don't", 'do not', 'no thanks', 'no thank you'];
+    return negative.some(word => normalized === word || normalized.startsWith(`${word},`) || normalized.startsWith(`${word} `));
+  }
+
+  function promptArchiveAfterTask(result, options = {}) {
+    if (!state.activeId) return;
+    const threadId = state.activeId;
+    const includeSuccess = Boolean(options.includeSuccess);
+    setPendingArchive(threadId);
+    if (includeSuccess) {
+      appendTurn(threadId, { role: 'assistant', content: buildTaskCreatedMessage(result) });
+    }
+    const prompt = 'Archive this email and move on? I can keep it here if you want.';
+    appendTurn(threadId, { role: 'assistant', content: prompt });
+    renderChat();
+    updateHint(threadId);
+  }
+
+  async function handleArchiveConfirmationResponse(userText) {
+    if (!state.activeId || !isArchiveConfirmationPending(state.activeId)) return;
+    const normalized = (userText || '').trim().toLowerCase();
+
+    const intent = await detectIntent(userText);
+    if (intent === 'archive') {
+      clearPendingArchive();
+      await handleArchiveIntent(userText, { alreadyLogged: true });
+      return;
+    }
+    if (intent === 'skip') {
+      clearPendingArchive();
+      handleAutoIntent('skip', userText, { alreadyLogged: true });
+      return;
+    }
+
+    if (isAffirmativeResponse(normalized)) {
+      clearPendingArchive();
+      await handleArchiveIntent(userText, { alreadyLogged: true });
+      return;
+    }
+
+    if (isNegativeResponse(normalized)) {
+      clearPendingArchive();
+      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, leaving it in Needs Review. Ask to archive anytime.' });
+      renderChat();
+      return;
+    }
+
+    appendTurn(state.activeId, { role: 'assistant', content: 'Want me to archive this email or keep it here?' });
+    renderChat();
+  }
+
   function setEmptyState(message) {
     const fallback = state.hasMore
       ? 'You reviewed everything loaded. Tap Load more to keep going.'
@@ -1415,8 +1683,20 @@
     if (archivePhrases.includes(cleaned)) return 'archive';
     const skipPhrases = ['skip', 'skip it', 'skip this', 'skip this one', 'skip this email', 'skip this thread'];
     if (skipPhrases.includes(cleaned)) return 'skip';
+    const taskPhrases = [
+      'create task',
+      'create a task',
+      'make a task',
+      'make this a task',
+      'add a task',
+      'set a reminder',
+      'reminder',
+      'add reminder',
+      'remind me'
+    ];
+    if (taskPhrases.includes(cleaned) || cleaned.includes('reminder')) return 'create_task';
     const intent = await evaluateIntent(text);
-    return intent === 'archive' || intent === 'skip' ? intent : '';
+    return intent === 'archive' || intent === 'skip' || intent === 'create_task' ? intent : '';
   }
 
   async function evaluateIntent(rawText) {
