@@ -279,13 +279,16 @@
       border-radius: 18px;
       padding: 14px;
       overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }
     .chat-stream {
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
-    .chat-divider {
+    .context-card {
       display: grid;
       grid-template-columns: 1fr auto 1fr;
       gap: 10px;
@@ -294,17 +297,16 @@
       font-size: 12px;
       padding: 4px 0;
     }
-    .chat-divider-line {
+    .context-card-line {
       display: block;
       height: 1px;
       background: var(--border);
       width: 100%;
     }
-    .chat-divider-card {
-      display: grid;
-      grid-template-columns: auto 1fr;
+    .context-card-body {
+      display: flex;
       gap: 10px;
-      align-items: center;
+      align-items: flex-start;
       background: #fff;
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -313,22 +315,10 @@
       color: var(--text);
       min-width: 0;
     }
-    .chat-divider-avatar {
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      display: grid;
-      place-items: center;
-      font-weight: 700;
-      font-size: 13px;
-      color: var(--text);
-    }
-    .chat-divider-content {
+    .context-card-content {
       min-width: 0;
     }
-    .chat-divider-meta {
+    .context-card-meta {
       margin: 0 0 2px;
       color: var(--muted);
       font-size: 12px;
@@ -337,7 +327,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .chat-divider-subject {
+    .context-card-subject {
       margin: 0;
       font-size: 13px;
       font-weight: 700;
@@ -347,15 +337,15 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .chat-divider-link {
+    .context-card-link {
       display: inline-block;
       margin-top: 4px;
       font-size: 12px;
       color: var(--muted);
       text-decoration: none;
     }
-    .chat-divider-link:hover,
-    .chat-divider-link:focus-visible {
+    .context-card-link:hover,
+    .context-card-link:focus-visible {
       text-decoration: underline;
     }
     .chat-placeholder-card {
@@ -385,6 +375,16 @@
       background: var(--text);
       color: #fff;
       border-color: transparent;
+    }
+    .chat-actions-card {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 8px 18px rgba(15,16,32,0.08);
     }
     .chat-card {
       padding: 12px 16px;
@@ -741,6 +741,52 @@
     .queue-item span {
       font-size: 13px;
       color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .queue-pill {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
+      width: 100%;
+      align-items: center;
+    }
+    .queue-avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 13px;
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+    }
+    .queue-text {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      width: 100%;
+    }
+    .queue-meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .queue-subject {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.4;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;

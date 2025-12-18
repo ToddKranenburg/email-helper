@@ -1,11 +1,8 @@
 <div class="triage-app">
   <header class="triage-header">
-    <div class="triage-title">
-      <p class="triage-label">Primary Inbox</p>
-      <div class="triage-heading">
-        <h1 class="triage-count" id="triage-count">0 emails</h1>
-        <button class="load-more-btn hidden" id="load-more-head" type="button">Load more</button>
-      </div>
+    <div class="triage-title triage-heading">
+      <h1 class="triage-count" id="triage-count">Secretary</h1>
+      <button class="load-more-btn hidden" id="load-more-head" type="button">Load more</button>
     </div>
     <div class="triage-controls">
       <button id="map-toggle" class="map-toggle" type="button" aria-expanded="false" aria-controls="inbox-drawer">Inbox map</button>
@@ -21,34 +18,59 @@
 
   <section class="triage-shell" id="triage-shell">
     <article class="email-panel" id="email-panel" aria-live="polite">
-      <div class="email-card" id="email-card">
-        <p class="email-position hidden" id="email-position">0 of 0</p>
-        <div class="email-meta">
-          <div class="avatar" id="email-avatar" aria-hidden="true">–</div>
-          <div class="email-meta-details">
-            <div class="email-meta-top">
-              <p class="sender" id="email-sender">Waiting on Gmail…</p>
-              <span class="email-dot" aria-hidden="true">•</span>
-              <p class="email-subject" id="email-subject">No email selected</p>
-            </div>
-            <p class="timestamp" id="email-received">Select ingest to begin.</p>
-          </div>
-          <a id="email-cta" class="cta-link hidden" target="_blank" rel="noreferrer">Open in Gmail ↗</a>
-        </div>
-        <div class="preview-drawer lifted">
-          <div id="email-preview" class="email-preview hidden" aria-live="polite"></div>
-          <button id="preview-toggle" class="preview-toggle" type="button" disabled>See email body</button>
-        </div>
-      </div>
-      <div class="empty-card hidden" id="email-empty">
-        <p>Nothing left in Needs Review. You’re caught up.</p>
-        <button class="load-more-btn hidden" id="load-more-empty" type="button">Load more</button>
-      </div>
-
       <section class="assistant-stack" id="assistant-panel">
         <div class="assistant-chat" id="assistant-chat">
           <div class="chat-stream" id="assistant-chat-log" aria-live="polite">
             <div class="chat-placeholder-card">I’ll drop the gist and nudge you forward.</div>
+          </div>
+          <div class="chat-actions-card">
+            <div class="triage-actions">
+              <button class="triage-btn review" id="action-review" type="button">👀 More info</button>
+              <button class="triage-btn archive" id="action-archive" type="button">Archive in Gmail</button>
+              <div class="triage-more">
+                <button class="triage-btn more" id="action-more" type="button" aria-haspopup="true" aria-expanded="false">▾ More actions</button>
+                <div class="more-menu hidden" id="more-menu" role="menu">
+                  <button type="button" data-action="task">Create task</button>
+                  <button type="button" data-action="skip">Skip</button>
+                </div>
+              </div>
+            </div>
+            <section class="task-panel hidden" id="task-panel" aria-live="polite">
+              <div class="task-panel-head">
+                <div>
+                  <p class="task-panel-label">📝 Create task (suggested)</p>
+                  <p class="task-panel-helper" id="task-panel-helper">Edit anything before saving.</p>
+                </div>
+                <button class="task-close" id="task-close" type="button" aria-label="Close create task panel">✕</button>
+              </div>
+              <div class="task-field">
+                <label for="task-title">Task title</label>
+                <input id="task-title" type="text" autocomplete="off" />
+              </div>
+              <div class="task-field">
+                <label for="task-notes">Details / notes</label>
+                <textarea id="task-notes" rows="3"></textarea>
+              </div>
+              <div class="task-field">
+                <label for="task-due">Due date (optional)</label>
+                <input id="task-due" type="date" placeholder="No due date" />
+              </div>
+              <p class="task-error hidden" id="task-error" role="alert"></p>
+              <div class="task-success hidden" id="task-success">
+                <div class="task-success-icon">✅</div>
+                <div class="task-success-copy">
+                  <p class="task-success-title">Task created</p>
+                  <p class="task-success-meta" id="task-success-meta"></p>
+                </div>
+              </div>
+              <div class="task-actions">
+                <button class="task-reset" id="task-reset" type="button">Reset to suggested</button>
+                <div class="task-actions-right">
+                  <button class="task-cancel" id="task-cancel" type="button">Cancel</button>
+                  <button class="task-submit" id="task-submit" type="button">Create task</button>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
         <form id="assistant-form" class="assistant-input">
@@ -56,53 +78,6 @@
           <textarea id="assistant-input-field" placeholder="Type or tap More info / Archive / Skip…" rows="1"></textarea>
           <button type="submit">Send</button>
         </form>
-        <div class="triage-actions">
-          <button class="triage-btn review" id="action-review" type="button">👀 More info</button>
-          <button class="triage-btn archive" id="action-archive" type="button">Archive in Gmail</button>
-          <div class="triage-more">
-            <button class="triage-btn more" id="action-more" type="button" aria-haspopup="true" aria-expanded="false">▾ More actions</button>
-            <div class="more-menu hidden" id="more-menu" role="menu">
-              <button type="button" data-action="task">Create task</button>
-              <button type="button" data-action="skip">Skip</button>
-            </div>
-          </div>
-        </div>
-        <section class="task-panel hidden" id="task-panel" aria-live="polite">
-          <div class="task-panel-head">
-            <div>
-              <p class="task-panel-label">📝 Create task (suggested)</p>
-              <p class="task-panel-helper" id="task-panel-helper">Edit anything before saving.</p>
-            </div>
-            <button class="task-close" id="task-close" type="button" aria-label="Close create task panel">✕</button>
-          </div>
-          <div class="task-field">
-            <label for="task-title">Task title</label>
-            <input id="task-title" type="text" autocomplete="off" />
-          </div>
-          <div class="task-field">
-            <label for="task-notes">Details / notes</label>
-            <textarea id="task-notes" rows="3"></textarea>
-          </div>
-          <div class="task-field">
-            <label for="task-due">Due date (optional)</label>
-            <input id="task-due" type="date" placeholder="No due date" />
-          </div>
-          <p class="task-error hidden" id="task-error" role="alert"></p>
-          <div class="task-success hidden" id="task-success">
-            <div class="task-success-icon">✅</div>
-            <div class="task-success-copy">
-              <p class="task-success-title">Task created</p>
-              <p class="task-success-meta" id="task-success-meta"></p>
-            </div>
-          </div>
-          <div class="task-actions">
-            <button class="task-reset" id="task-reset" type="button">Reset to suggested</button>
-            <div class="task-actions-right">
-              <button class="task-cancel" id="task-cancel" type="button">Cancel</button>
-              <button class="task-submit" id="task-submit" type="button">Create task</button>
-            </div>
-          </div>
-        </section>
         <div class="assistant-meta">
           <span id="assistant-hint">Ask up to 20 questions per email.</span>
           <span class="chat-error hidden" id="assistant-error"></span>

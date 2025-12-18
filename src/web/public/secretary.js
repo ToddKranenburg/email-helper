@@ -18,18 +18,6 @@
     progress: document.getElementById('triage-progress'),
     progressTrack: document.querySelector('.triage-progress'),
     queuePill: document.getElementById('queue-pill-text'),
-    emailCard: document.getElementById('email-card'),
-    emailEmpty: document.getElementById('email-empty'),
-    loadMoreEmpty: document.getElementById('load-more-empty'),
-    emailEmptyText: document.querySelector('#email-empty p'),
-    avatar: document.getElementById('email-avatar'),
-    sender: document.getElementById('email-sender'),
-    received: document.getElementById('email-received'),
-    subject: document.getElementById('email-subject'),
-    position: document.getElementById('email-position'),
-    cta: document.getElementById('email-cta'),
-    preview: document.getElementById('email-preview'),
-    previewToggle: document.getElementById('preview-toggle'),
     chatLog: document.getElementById('assistant-chat-log'),
     chatScroll: document.getElementById('assistant-chat'),
     chatForm: document.getElementById('assistant-form'),
@@ -60,7 +48,7 @@
     reviewList: document.getElementById('review-list')
   };
 
-  if (!refs.chatLog || !refs.chatForm || !refs.emailCard || !refs.emailEmpty) {
+  if (!refs.chatLog || !refs.chatForm) {
     return;
   }
 
@@ -127,17 +115,6 @@
     updateLoadMoreButtons();
     wireEvents();
 
-    if (refs.previewToggle && refs.preview) {
-      refs.previewToggle.addEventListener('click', () => {
-        if (refs.previewToggle.disabled) return;
-        const isHidden = refs.preview.classList.toggle('hidden');
-        refs.previewToggle.textContent = isHidden ? 'See email body' : 'Hide email body';
-        if (!isHidden) {
-          refs.preview.scrollTop = 0;
-        }
-      });
-    }
-
     if (state.needs.length) {
       setActiveThread(state.needs[0]);
     } else {
@@ -170,13 +147,6 @@
         nudgeComposer(DEFAULT_NUDGE, { focus: false });
       });
     }
-    if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.addEventListener('click', async () => {
-        await fetchNextPage('empty-card');
-        nudgeComposer(DEFAULT_NUDGE, { focus: false });
-      });
-    }
-
     if (refs.mapToggle && refs.drawer) {
       refs.mapToggle.addEventListener('click', () => toggleDrawer(true));
       refs.drawer.addEventListener('click', (event) => {
@@ -377,9 +347,6 @@
       updateQueuePill();
       updateDrawerLists();
       updateLoadMoreButtons();
-      if (state.activeId && state.lookup.has(state.activeId)) {
-        updateEmailCard(state.lookup.get(state.activeId));
-      }
       if (!state.activeId && state.needs.length) {
         setActiveThread(state.needs[0]);
       }
@@ -412,14 +379,6 @@
       clearPendingArchive();
     }
 
-    refs.emailCard.classList.remove('hidden');
-    refs.emailEmpty.classList.add('hidden');
-    if (refs.mapToggle) {
-      refs.mapToggle.disabled = false;
-      refs.mapToggle.removeAttribute('aria-disabled');
-    }
-
-    updateEmailCard(thread);
     refreshTaskSuggestion(thread);
     ensurePrimerFetch(threadId);
     ensureHistory(threadId);
@@ -432,42 +391,6 @@
     toggleComposer(true);
     refs.chatInput.value = '';
     nudgeComposer(DEFAULT_NUDGE, { focus: true });
-  }
-
-  function updateEmailCard(thread) {
-    if (refs.position) {
-      const label = formatEmailPosition(thread.threadId);
-      refs.position.textContent = label || '';
-      refs.position.classList.toggle('hidden', !label);
-    }
-    if (refs.avatar) refs.avatar.textContent = initialsFromSender(thread.from);
-    if (refs.sender) refs.sender.textContent = thread.from || 'Unknown sender';
-    if (refs.received) refs.received.textContent = formatTimestamp(thread.receivedAt);
-    if (refs.subject) refs.subject.textContent = thread.subject || '(no subject)';
-    if (refs.cta) {
-      if (thread.link) {
-        refs.cta.href = thread.link;
-        refs.cta.classList.remove('hidden');
-      } else {
-        refs.cta.classList.add('hidden');
-        refs.cta.removeAttribute('href');
-      }
-    }
-    if (refs.preview && refs.previewToggle) {
-      const previewText = (thread.convo || '').trim();
-      if (previewText) {
-        refs.preview.innerHTML = renderPlainText(previewText, { preserveLineBreaks: true });
-        refs.preview.classList.add('hidden');
-        refs.previewToggle.disabled = false;
-        refs.previewToggle.textContent = 'See email body';
-      } else {
-        const fallbackCopy = 'Email body is unavailable for this message.';
-        refs.preview.innerHTML = renderPlainText(fallbackCopy);
-        refs.preview.classList.remove('hidden');
-        refs.previewToggle.disabled = true;
-        refs.previewToggle.textContent = 'Email body unavailable';
-      }
-    }
   }
 
   function refreshTaskSuggestion(thread) {
@@ -780,14 +703,7 @@
 
   function updateHeaderCount() {
     if (!refs.count) return;
-    const loaded = getLoadedCount();
-    let label = '0 emails under review';
-    if (loaded > 0 && state.hasMore) {
-      label = `${loaded}+ emails under review`;
-    } else if (loaded > 0) {
-      label = `${loaded} email${loaded === 1 ? '' : 's'} under review`;
-    }
-    refs.count.textContent = label;
+    refs.count.textContent = 'Secretary';
     updateLoadMoreButtons();
   }
 
@@ -811,16 +727,6 @@
       } else {
         refs.loadMoreHead.disabled = true;
         refs.loadMoreHead.textContent = 'All emails loaded';
-      }
-    }
-    if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.classList.remove('hidden');
-      if (state.hasMore) {
-        refs.loadMoreEmpty.disabled = state.loadingMore;
-        refs.loadMoreEmpty.textContent = state.loadingMore ? 'Loading…' : 'Load more';
-      } else {
-        refs.loadMoreEmpty.disabled = true;
-        refs.loadMoreEmpty.textContent = 'All emails loaded';
       }
     }
   }
@@ -924,7 +830,24 @@
     btn.type = 'button';
     btn.className = buildThreadClass(variant, { active: threadId === state.activeId });
     btn.dataset.threadId = threadId;
-    btn.innerHTML = `<strong>${htmlEscape(thread.from || 'Unknown sender')}</strong><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
+    const sender = htmlEscape(thread.from || 'Unknown sender');
+    const subject = htmlEscape(thread.subject || '(no subject)');
+    if (variant === 'queue') {
+      const initials = htmlEscape(initialsFromSender(thread.from));
+      const received = htmlEscape(formatTimestamp(thread.receivedAt));
+      const meta = [sender, received].filter(Boolean).join(' • ');
+      btn.innerHTML = `
+        <div class="queue-pill">
+          <div class="queue-avatar" aria-hidden="true">${initials}</div>
+          <div class="queue-text">
+            <p class="queue-meta">${meta}</p>
+            <p class="queue-subject">${subject}</p>
+          </div>
+        </div>
+      `;
+    } else {
+      btn.innerHTML = `<strong>${sender}</strong><span>${subject}</span>`;
+    }
     li.appendChild(btn);
     listEl.appendChild(li);
   }
@@ -1023,9 +946,8 @@
     }
     const history = state.histories.get(threadId);
     if (!history.length) {
-      insertThreadDivider(threadId);
-      const thread = state.lookup.get(threadId);
-      const intro = buildIntroMessage(thread);
+      insertContextSwitchCard(threadId);
+      const intro = buildIntroMessage(state.lookup.get(threadId));
       if (intro) {
         const turn = { role: 'assistant', content: intro };
         history.push(turn);
@@ -1061,10 +983,10 @@
     return removed;
   }
 
-  function insertThreadDivider(threadId) {
+  function insertContextSwitchCard(threadId) {
     const thread = state.lookup.get(threadId);
     if (!thread) return;
-    const alreadyInserted = state.timeline.some(item => item.type === 'divider' && item.threadId === threadId);
+    const alreadyInserted = state.timeline.some(item => item.type === 'contextSwitch' && item.threadId === threadId);
     if (alreadyInserted) return;
     const sender = thread.from ? thread.from.split('<')[0].trim() || thread.from : '';
     const subject = (thread.subject || '').trim() || '(no subject)';
@@ -1073,7 +995,7 @@
     labelParts.push(subject);
     const label = labelParts.join(' — ');
     state.timeline.push({
-      type: 'divider',
+      type: 'contextSwitch',
       threadId,
       label,
       subject,
@@ -1205,7 +1127,7 @@
       if (thread && status !== 'loading' && status !== 'pending') {
         const intro = buildIntroMessage(thread);
         if (intro) {
-          insertThreadDivider(threadId);
+          insertContextSwitchCard(threadId);
           const turn = { role: 'assistant', content: intro };
           state.histories.set(threadId, [turn]);
           state.timeline.push({ type: 'turn', threadId, turn });
@@ -1247,7 +1169,7 @@
     if (history && history.length && history[0]?.role === 'assistant') {
       history[0].content = primer;
     } else {
-      insertThreadDivider(threadId);
+      insertContextSwitchCard(threadId);
       const turn = { role: 'assistant', content: primer };
       state.histories.set(threadId, [turn]);
       state.timeline.push({ type: 'turn', threadId, turn });
@@ -1274,31 +1196,8 @@
       return;
     }
     let markup = timeline.map(entry => {
-      if (entry.type === 'divider') {
-        const label = htmlEscape(entry.label || 'New email thread');
-        const sender = htmlEscape(entry.sender || '');
-        const subject = htmlEscape(entry.subject || '');
-        const timestamp = entry.receivedAt ? formatTimestamp(entry.receivedAt) : '';
-        const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
-        const initials = initialsFromSender(entry.sender || entry.label || '');
-        const link = entry.link ? escapeAttribute(entry.link) : '';
-        const linkHtml = link
-          ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
-          : '';
-        return `
-          <div class="chat-divider">
-            <span class="chat-divider-line" aria-hidden="true"></span>
-            <div class="chat-divider-card">
-              <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
-              <div class="chat-divider-content">
-                <p class="chat-divider-meta">${meta}</p>
-                <p class="chat-divider-subject">${subject || label}</p>
-                ${linkHtml}
-              </div>
-            </div>
-            <span class="chat-divider-line" aria-hidden="true"></span>
-          </div>
-        `;
+      if (entry.type === 'contextSwitch') {
+        return renderContextSwitchCard(entry);
       }
       const turn = entry.turn;
       if (turn.role === 'assistant') {
@@ -1311,6 +1210,31 @@
     }
     refs.chatLog.innerHTML = markup;
     if (refs.chatScroll) refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+  }
+
+  function renderContextSwitchCard(entry) {
+    const label = htmlEscape(entry.label || 'New email thread');
+    const sender = htmlEscape(entry.sender || '');
+    const subject = htmlEscape(entry.subject || '');
+    const timestamp = entry.receivedAt ? formatTimestamp(entry.receivedAt) : '';
+    const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
+    const link = entry.link ? escapeAttribute(entry.link) : '';
+    const linkHtml = link
+      ? `<a class="context-card-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
+      : '';
+    return `
+      <div class="context-card">
+        <span class="context-card-line" aria-hidden="true"></span>
+        <div class="context-card-body">
+          <div class="context-card-content">
+            <p class="context-card-meta">${meta}</p>
+            <p class="context-card-subject">${subject || label}</p>
+            ${linkHtml}
+          </div>
+        </div>
+        <span class="context-card-line" aria-hidden="true"></span>
+      </div>
+    `;
   }
 
   function chatPlaceholder() {
@@ -1808,20 +1732,15 @@
     closeTaskPanel(true);
     hideMoreMenu();
     state.activeId = '';
-    refs.emailCard.classList.add('hidden');
-    refs.emailEmpty.classList.remove('hidden');
-    if (refs.position) {
-      refs.position.textContent = '';
-      refs.position.classList.add('hidden');
-    }
-    if (refs.emailEmptyText) refs.emailEmptyText.textContent = copy;
-    if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.classList.toggle('hidden', !state.hasMore);
-    }
     if (refs.mapToggle) {
       refs.mapToggle.setAttribute('aria-disabled', 'true');
       refs.mapToggle.disabled = true;
     }
+    if (refs.chatLog) {
+      refs.chatLog.innerHTML = `<div class="chat-placeholder-card">${htmlEscape(copy)}</div>`;
+    }
+    setChatError('');
+    toggleComposer(false);
     renderChat();
     updateQueuePill();
     updateLoadMoreButtons();
