@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "dev:reset": "npm run db:reset && npm run dev",
-    "db:reset": "rm -f prisma/dev.db && npx prisma migrate dev",
+    "db:reset": "npx prisma migrate reset --force",
+    "db:up": "docker-compose up -d",
+    "db:down": "docker-compose down",
     "build": "npm install --include=dev && npx prisma generate && tsc && if [ \"$NODE_ENV\" = \"production\" ]; then npm prune --omit=dev; fi",
     "deploy:migrate": "npx prisma migrate deploy",
     "prestart": "npm run deploy:migrate",
