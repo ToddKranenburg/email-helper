@@ -109,6 +109,8 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
     create: userPayload
   });
 
+  await upsertGoogleToken(userId, tokens);
+
   (req.session as any).googleTokens = tokens;
   (req.session as any).user = userPayload;
   res.redirect('/dashboard');
@@ -125,4 +127,84 @@ export function getAuthedClient(sessionObj: any) {
   const client = createOAuthClient();
   client.setCredentials(sessionObj.googleTokens);
   return client;
+}
+
+type StoredToken = {
+  refreshToken: string;
+  accessToken?: string | null;
+  scope?: string | null;
+  tokenType?: string | null;
+  expiryDate?: Date | null;
+};
+
+export function getAuthedClientFromStoredToken(userId: string, token: StoredToken) {
+  const client = createOAuthClient();
+  client.setCredentials({
+    refresh_token: token.refreshToken,
+    access_token: token.accessToken ?? undefined,
+    scope: token.scope ?? undefined,
+    token_type: token.tokenType ?? undefined,
+    expiry_date: token.expiryDate ? token.expiryDate.getTime() : undefined
+  });
+  attachTokenListener(client, userId);
+  return client;
+}
+
+async function upsertGoogleToken(
+  userId: string,
+  tokens: {
+    refresh_token?: string | null;
+    access_token?: string | null;
+    scope?: string | null;
+    token_type?: string | null;
+    expiry_date?: number | null;
+  }
+) {
+  const existing = await prisma.googleToken.findUnique({ where: { userId } });
+  const refreshToken = tokens.refresh_token ?? existing?.refreshToken;
+  if (!refreshToken) {
+    console.warn('No refresh token available for user', { userId });
+    return;
+  }
+  const data = {
+    userId,
+    refreshToken,
+    accessToken: tokens.access_token ?? existing?.accessToken ?? null,
+    scope: tokens.scope ?? existing?.scope ?? null,
+    tokenType: tokens.token_type ?? existing?.tokenType ?? null,
+    expiryDate: tokens.expiry_date
+      ? new Date(tokens.expiry_date)
+      : existing?.expiryDate ?? null
+  };
+  if (existing) {
+    await prisma.googleToken.update({ where: { userId }, data });
+  } else {
+    await prisma.googleToken.create({ data });
+  }
+}
+
+function attachTokenListener(client: ReturnType<typeof createOAuthClient>, userId: string) {
+  client.on('tokens', (tokens) => {
+    if (!tokens) return;
+    const hasUpdates = Boolean(
+      tokens.access_token || tokens.refresh_token || tokens.expiry_date || tokens.scope || tokens.token_type
+    );
+    if (!hasUpdates) return;
+    void prisma.googleToken.findUnique({ where: { userId } }).then(existing => {
+      if (!existing) return;
+      const refreshToken = tokens.refresh_token ?? existing.refreshToken;
+      return prisma.googleToken.update({
+        where: { userId },
+        data: {
+          refreshToken,
+          accessToken: tokens.access_token ?? existing.accessToken,
+          scope: tokens.scope ?? existing.scope,
+          tokenType: tokens.token_type ?? existing.tokenType,
+          expiryDate: tokens.expiry_date ? new Date(tokens.expiry_date) : existing.expiryDate
+        }
+      });
+    }).catch(err => {
+      console.warn('Failed to persist refreshed Google tokens', { userId, error: err instanceof Error ? err.message : err });
+    });
+  });
 }

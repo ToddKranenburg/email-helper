@@ -10,6 +10,8 @@
     "deploy:migrate": "npx prisma migrate deploy",
     "prestart": "npm run deploy:migrate",
     "start": "node dist/server.js",
+    "batch:sync": "node dist/jobs/batchSync.js",
+    "batch:sync:dev": "tsx src/jobs/batchSync.ts",
     "prisma:gen": "prisma generate"
   },
   "dependencies": {

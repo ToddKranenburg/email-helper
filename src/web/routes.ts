@@ -24,6 +24,18 @@ const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'er
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
 
+router.use(async (req, _res, next) => {
+  const sessionData = req.session as any;
+  if (sessionData?.user?.id && sessionData?.user?.email) {
+    try {
+      await ensureUserRecord(sessionData);
+    } catch (err) {
+      console.warn('Failed to update user activity', err);
+    }
+  }
+  next();
+});
+
 function clearGoogleSession(sessionData: any) {
   if (!sessionData) return;
   delete sessionData.googleTokens;
@@ -670,13 +682,15 @@ async function ensureUserRecord(sessionData: any) {
     update: {
       email: user.email,
       name: user.name ?? undefined,
-      picture: user.picture ?? undefined
+      picture: user.picture ?? undefined,
+      lastActiveAt: new Date()
     },
     create: {
       id: user.id,
       email: user.email,
       name: user.name ?? null,
-      picture: user.picture ?? null
+      picture: user.picture ?? null,
+      lastActiveAt: new Date()
     }
   });
 }

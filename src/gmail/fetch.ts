@@ -5,6 +5,7 @@ import { getAuthedClient } from '../auth/google.js';
 import { prisma } from '../store/db.js';
 import type { gmail_v1 } from 'googleapis';
 import type { GaxiosResponse } from 'gaxios';
+import type { OAuth2Client } from 'google-auth-library';
 
 const THREAD_BATCH_SIZE = 20;
 
@@ -33,6 +34,10 @@ export async function ingestInbox(session: any, opts: IngestOptions = {}) {
   if (!user?.id) throw new Error('User session missing during ingest');
 
   const auth = getAuthedClient(session);
+  return ingestInboxWithClient(auth, user.id, opts);
+}
+
+export async function ingestInboxWithClient(auth: OAuth2Client, userId: string, opts: IngestOptions = {}) {
   const gmail: gmail_v1.Gmail = gmailClient(auth);
 
   let pageToken: string | undefined = undefined;
@@ -94,7 +99,7 @@ export async function ingestInbox(session: any, opts: IngestOptions = {}) {
           if (!threadId) return;
 
           await prisma.thread.upsert({
-            where: { id_userId: { id: threadId, userId: user.id } },
+            where: { id_userId: { id: threadId, userId } },
             update: {
               subject,
               participants: JSON.stringify(participants),
@@ -102,11 +107,11 @@ export async function ingestInbox(session: any, opts: IngestOptions = {}) {
               historyId: full.data.historyId,
               fromName,
               fromEmail,
-              userId: user.id
+              userId
             },
             create: {
               id: threadId,
-              userId: user.id,
+              userId,
               subject,
               participants: JSON.stringify(participants),
               lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
@@ -120,7 +125,7 @@ export async function ingestInbox(session: any, opts: IngestOptions = {}) {
           const existing = await prisma.summary.findUnique({
             where: {
               userId_lastMsgId: {
-                userId: user.id,
+                userId,
                 lastMsgId: latestMsgId
               }
             }
@@ -133,7 +138,7 @@ export async function ingestInbox(session: any, opts: IngestOptions = {}) {
             .reverse()
             .join('\n\n---\n\n');
 
-          const created = await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, user.id);
+          const created = await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, userId);
           if (created) createdCount += 1;
         })
       )

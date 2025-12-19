@@ -12,12 +12,17 @@ model User {
   email     String   @unique
   name      String?
   picture   String?
+  lastActiveAt        DateTime?
+  lastBatchSyncAt     DateTime?
+  lastBatchSyncStatus String?
+  lastBatchSyncError  String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   threads     Thread[]
   summaries   Summary[]
   processings Processing[]
+  googleToken GoogleToken?
 }
 
 model Thread {
@@ -69,4 +74,15 @@ model Processing {
   Thread             Thread   @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
 
   @@id([threadId, userId])
+}
+
+model GoogleToken {
+  userId       String   @id
+  refreshToken String
+  accessToken  String?
+  scope        String?
+  tokenType    String?
+  expiryDate   DateTime?
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
