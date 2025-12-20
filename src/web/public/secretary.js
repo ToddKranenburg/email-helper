@@ -5,12 +5,15 @@
   const PAGE_SIZE = typeof bootstrap.pageSize === 'number' ? bootstrap.pageSize : 20;
   const HAS_MORE = Boolean(bootstrap.hasMore);
   const NEXT_PAGE = typeof bootstrap.nextPage === 'number' ? bootstrap.nextPage : (HAS_MORE ? 2 : 0);
-  const PRIMER_ENDPOINT = '/secretary/primer';
-  const PRIMER_RETRY_DELAY = 1500;
-  const MAX_PRIMER_POLLS = 8;
   const DEFAULT_NUDGE = 'Type your next move here.';
   const REVIEW_PROMPT = 'Give me a more detailed but easy-to-digest summary of this email. Highlight the main points, asks, deadlines, and any decisions in quick bullets.';
   window.SECRETARY_BOOTSTRAP = undefined;
+  const debugEnabled = true;
+  const logDebug = (...args) => {
+    if (!debugEnabled) return;
+    // eslint-disable-next-line no-console
+    console.info('[secretary]', ...args);
+  };
 
   const refs = {
     count: document.getElementById('triage-count'),
@@ -70,6 +73,9 @@
     needs: [],
     histories: new Map(),
     timeline: [],
+    timelineMessageIds: new Set(),
+    serverTimelines: new Map(),
+    actionFlows: new Map(),
     activeId: '',
     typing: false,
     totalLoaded: threads.length,
@@ -78,9 +84,10 @@
     nextPage: NEXT_PAGE,
     loadingMore: false,
     autoAdvanceTimer: 0,
-    prepTyping: '',
     pendingCreateThreadId: '',
     pendingArchiveThreadId: '',
+    hydrated: new Set(),
+    hydrating: new Set(),
     pendingSuggestedActions: new Map()
   };
   const taskState = {
@@ -92,8 +99,6 @@
     lastSourceId: ''
   };
   const reviewedIds = new Set();
-  const primerStatus = new Map();
-  const primerRetryTimers = new Map();
   let composerNudgeTimer = 0;
 
   const markedLib = resolveMarked();
@@ -107,13 +112,20 @@
   }
 
   threads.forEach((thread, index) => {
-    if (!thread || !thread.threadId) return;
-    thread.primer = typeof thread.primer === 'string' ? thread.primer.trim() : '';
-    thread.messageId = typeof thread.messageId === 'string' ? thread.messageId.trim() : '';
-    state.lookup.set(thread.threadId, thread);
-    state.positions.set(thread.threadId, index);
-    state.needs.push(thread.threadId);
-    primerStatus.set(thread.threadId, thread.primer ? 'ready' : 'idle');
+    const normalized = normalizeThread(thread);
+    if (!normalized) return;
+    state.lookup.set(normalized.threadId, normalized);
+    state.positions.set(normalized.threadId, index);
+    state.needs.push(normalized.threadId);
+    state.serverTimelines.set(normalized.threadId, normalized.timeline || []);
+    if (normalized.actionFlow) {
+      state.actionFlows.set(normalized.threadId, normalized.actionFlow);
+    }
+    logDebug('bootstrap thread', {
+      threadId: normalized.threadId,
+      timelineCount: normalized.timeline?.length || 0,
+      actionFlow: normalized.actionFlow
+    });
   });
   state.totalLoaded = state.positions.size;
 
@@ -150,6 +162,7 @@
     refs.chatForm.addEventListener('submit', handleChatSubmit);
     refs.chatInput.addEventListener('keydown', handleChatKeydown);
     refs.chatInput.addEventListener('input', clearComposerNudge);
+    refs.chatLog.addEventListener('click', handleTimelineClick);
 
     if (refs.reviewBtn) {
       refs.reviewBtn.addEventListener('click', () => requestReview());
@@ -243,6 +256,39 @@
     setActiveThread(threadId);
   }
 
+  function handleTimelineClick(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const action = target.getAttribute('data-action');
+    if (!action) return;
+    const threadId = target.getAttribute('data-thread-id') || state.activeId;
+    if (!threadId) return;
+    if (action === 'suggested-primary') {
+      const actionType = normalizeSuggestedAction(target.getAttribute('data-action-type'));
+      handleSuggestedActionClick(threadId, actionType);
+      return;
+    }
+    if (action === 'draft-create') {
+      executeActionForThread(threadId, 'create_task');
+      return;
+    }
+    if (action === 'draft-edit') {
+      requestDraft(threadId, 'edit');
+      return;
+    }
+    if (action === 'editor-create' || action === 'editor-save') {
+      const editor = target.closest('.draft-editor');
+      const values = readInlineEditorValues(editor);
+      if (!values) return;
+      if (action === 'editor-create') {
+        executeActionForThread(threadId, 'create_task', values);
+      } else {
+        requestDraft(threadId, 'save', values);
+      }
+      return;
+    }
+  }
+
   function handleChatKeydown(event) {
     if (event.defaultPrevented) return;
     if (event.key !== 'Enter') return;
@@ -262,8 +308,7 @@
     const asked = history.filter(turn => turn.role === 'user').length;
     const pendingCreate = isCreateConfirmationPending(state.activeId);
     const pendingArchive = isArchiveConfirmationPending(state.activeId);
-    const pendingSuggested = Boolean(getPendingSuggestedAction(state.activeId));
-    if (!pendingCreate && !pendingArchive && !pendingSuggested && MAX_TURNS > 0 && asked >= MAX_TURNS) {
+    if (!pendingCreate && !pendingArchive && MAX_TURNS > 0 && asked >= MAX_TURNS) {
       setChatError('Chat limit reached for this email.');
       return;
     }
@@ -278,16 +323,20 @@
     if (submitBtn) submitBtn.disabled = true;
 
     try {
-      if (pendingSuggested) {
-        const handled = await handleSuggestedActionResponse(question);
-        if (handled) return;
-      }
       if (pendingCreate) {
         await handleCreateConfirmationResponse(question);
         return;
       }
       if (pendingArchive) {
         await handleArchiveConfirmationResponse(question);
+        return;
+      }
+
+      const handledSuggested = await handleSuggestedActionResponse(question);
+      if (handledSuggested) {
+        setAssistantTyping(false);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
         return;
       }
 
@@ -348,6 +397,142 @@
     }
   }
 
+  async function handleSuggestedActionClick(threadId, actionType) {
+    const normalized = normalizeSuggestedAction(actionType);
+    if (!normalized) return;
+    clearPendingSuggestedAction(threadId);
+    if (normalized === 'create_task') {
+      await requestDraft(threadId, 'generate');
+      return;
+    }
+    await executeActionForThread(threadId, normalized);
+  }
+
+  async function fetchAutoSummary(threadId) {
+    if (!threadId || state.hydrating.has(threadId)) return;
+    state.hydrating.add(threadId);
+    logDebug('fetchAutoSummary:start', threadId);
+    try {
+      const resp = await fetch('/secretary/auto-summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || 'Unable to prep this email.');
+      if (data.flow) updateActionFlow(threadId, data.flow);
+      if (Array.isArray(data.timeline)) {
+        syncTimelineFromServer(threadId, data.timeline);
+      }
+      state.hydrated.add(threadId);
+      renderChat(threadId);
+      logDebug('fetchAutoSummary:done', { threadId, timelineCount: Array.isArray(data.timeline) ? data.timeline.length : 0, flow: data.flow });
+    } catch (err) {
+      console.error('Auto summarize failed', err);
+      if (threadId === state.activeId) {
+        setChatError(err instanceof Error ? err.message : 'Unable to load that email right now.');
+      }
+      state.hydrated.delete(threadId);
+    } finally {
+      state.hydrating.delete(threadId);
+    }
+  }
+
+  async function requestDraft(threadId, mode = 'generate', draft) {
+    if (!threadId) return;
+    try {
+      const resp = await fetch('/secretary/action/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId, mode, draft })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || 'Unable to prepare the draft.');
+      if (data.flow) updateActionFlow(threadId, data.flow);
+      if (Array.isArray(data.timeline)) {
+        syncTimelineFromServer(threadId, data.timeline);
+      }
+      renderChat(threadId);
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : 'Unable to prepare that action.');
+    }
+  }
+
+  async function executeActionForThread(threadId, actionType, draftPayload) {
+    if (!threadId || !actionType) return;
+    setChatError('');
+    try {
+      const resp = await fetch('/secretary/action/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          threadId,
+          actionType,
+          ...(draftPayload ? { draft: draftPayload } : {})
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        if (data.flow) updateActionFlow(threadId, data.flow);
+        if (Array.isArray(data.timeline)) {
+          syncTimelineFromServer(threadId, data.timeline);
+        }
+        throw new Error(data?.error || 'Unable to process that action.');
+      }
+      if (data.flow) updateActionFlow(threadId, data.flow);
+      if (Array.isArray(data.timeline)) {
+        syncTimelineFromServer(threadId, data.timeline);
+      }
+      if (actionType === 'archive') {
+        removeCurrentFromQueue();
+      } else if (actionType === 'skip') {
+        skipCurrent('action');
+      } else if (actionType === 'create_task') {
+        clearPendingCreate();
+        if (data?.status === 'created') {
+          advanceToNextThread(threadId);
+        }
+      }
+      clearPendingSuggestedAction(threadId);
+      if (threadId === state.activeId) {
+        renderChat(threadId);
+      } else if (state.activeId) {
+        renderChat(state.activeId);
+      }
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : 'Unable to process that action.');
+    }
+  }
+
+  function syncTimelineFromServer(threadId, timeline) {
+    state.serverTimelines.set(threadId, Array.isArray(timeline) ? timeline : []);
+    state.hydrated.add(threadId);
+    mergeServerTimeline(threadId, timeline || []);
+    logDebug('syncTimelineFromServer', { threadId, timelineCount: Array.isArray(timeline) ? timeline.length : 0 });
+  }
+
+  function updateActionFlow(threadId, flow) {
+    if (!flow) return;
+    state.actionFlows.set(threadId, flow);
+    const thread = state.lookup.get(threadId);
+    if (thread) thread.actionFlow = flow;
+  }
+
+  function readInlineEditorValues(editorEl) {
+    if (!editorEl) return null;
+    const title = editorEl.querySelector('[data-field=\"title\"]');
+    const notes = editorEl.querySelector('[data-field=\"notes\"]');
+    const due = editorEl.querySelector('[data-field=\"dueDate\"]');
+    return {
+      title: title?.value?.trim() || '',
+      notes: notes?.value?.trim() || '',
+      dueDate: due?.value?.trim() || ''
+    };
+  }
+
   async function fetchNextPage(reason) {
     if (!state.hasMore || state.loadingMore) return [];
     state.loadingMore = true;
@@ -400,6 +585,11 @@
     clearAutoAdvance();
     state.activeId = threadId;
     const thread = state.lookup.get(threadId);
+    logDebug('setActiveThread', threadId, {
+      hasTimeline: state.timeline.some(item => item.threadId === threadId),
+      serverTimelineCount: (state.serverTimelines.get(threadId) || []).length,
+      hydrated: state.hydrated.has(threadId)
+    });
     if (!thread) return;
     hideMoreMenu();
     if (taskState.open && taskState.lastSourceId !== threadId) {
@@ -420,10 +610,8 @@
     }
 
     updateEmailCard(thread);
-    refreshTaskSuggestion(thread);
-    ensurePrimerFetch(threadId);
+    hydrateThreadTimeline(threadId);
     ensureHistory(threadId);
-    refreshPrepTyping(threadId);
     setChatError('');
     renderChat(threadId);
     updateHint(threadId);
@@ -851,8 +1039,9 @@
     event.preventDefault();
     hideMoreMenu();
     if (action === 'task') {
-      clearPendingCreate();
-      openTaskPanel();
+      if (state.activeId) {
+        requestDraft(state.activeId, 'generate');
+      }
     }
     if (action === 'skip') {
       skipCurrent('menu');
@@ -941,13 +1130,15 @@
   function appendThreads(items) {
     const added = [];
     items.forEach(thread => {
-      if (!thread || !thread.threadId) return;
-      if (state.lookup.has(thread.threadId)) return;
-      state.lookup.set(thread.threadId, thread);
-      state.positions.set(thread.threadId, state.positions.size);
-      state.needs.push(thread.threadId);
-      primerStatus.set(thread.threadId, thread.primer ? 'ready' : 'idle');
-      added.push(thread.threadId);
+      const normalized = normalizeThread(thread);
+      if (!normalized || !normalized.threadId) return;
+      if (state.lookup.has(normalized.threadId)) return;
+      state.lookup.set(normalized.threadId, normalized);
+      state.positions.set(normalized.threadId, state.positions.size);
+      state.needs.push(normalized.threadId);
+      state.serverTimelines.set(normalized.threadId, normalized.timeline || []);
+      if (normalized.actionFlow) state.actionFlows.set(normalized.threadId, normalized.actionFlow);
+      added.push(normalized.threadId);
     });
     if (added.length) {
       state.totalLoaded = state.positions.size;
@@ -972,7 +1163,38 @@
       suggestedAction: normalizeSuggestedAction(raw.suggestedAction) || guessSuggestedAction(raw),
       category: typeof raw.category === 'string' ? raw.category : '',
       receivedAt: typeof raw.receivedAt === 'string' ? raw.receivedAt : '',
-      convo: typeof raw.convo === 'string' ? raw.convo : ''
+      convo: typeof raw.convo === 'string' ? raw.convo : '',
+      participants: Array.isArray(raw.participants) ? raw.participants.map(p => String(p || '').trim()).filter(Boolean) : [],
+      actionFlow: normalizeActionFlow(raw.actionFlow),
+      timeline: Array.isArray(raw.timeline) ? raw.timeline.map(normalizeTimelineMessage).filter(Boolean) : []
+    };
+  }
+
+  function normalizeActionFlow(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const allowedStates = new Set(['suggested', 'draft_ready', 'editing', 'executing', 'completed', 'failed']);
+    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip']);
+    const actionType = typeof raw.actionType === 'string' && allowedTypes.has(raw.actionType) ? raw.actionType : '';
+    const state = typeof raw.state === 'string' && allowedStates.has(raw.state) ? raw.state : 'suggested';
+    return actionType ? { ...raw, actionType, state } : null;
+  }
+
+  function normalizeTimelineMessage(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const messageType = typeof raw.type === 'string' ? raw.type : '';
+    const content = typeof raw.content === 'string' ? raw.content : '';
+    if (!raw.threadId) {
+      logDebug('normalizeTimelineMessage missing threadId', raw);
+    }
+    logDebug('normalizeTimelineMessage', { id: raw.id, messageType, contentPreview: content?.slice?.(0, 80) });
+    return {
+      id: typeof raw.id === 'string' ? raw.id : '',
+      threadId: typeof raw.threadId === 'string' ? raw.threadId : '',
+      type: 'transcript',
+      messageType,
+      content,
+      payload: raw.payload || {},
+      createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : ''
     };
   }
 
@@ -991,6 +1213,22 @@
     }
     if (summary.includes('fyi') || summary.includes('newsletter')) return 'skip';
     return 'more_info';
+  }
+
+  function normalizeDraftPayload(raw) {
+    const draft = raw && typeof raw === 'object' ? raw : {};
+    const title = typeof draft.title === 'string' ? draft.title.trim() : '';
+    const notes = typeof draft.notes === 'string' ? draft.notes.trim() : '';
+    const dueDate = typeof draft.dueDate === 'string' ? draft.dueDate.trim() : '';
+    return { title, notes, dueDate };
+  }
+
+  function suggestedActionLabel(actionType) {
+    if (actionType === 'archive') return 'Archive';
+    if (actionType === 'create_task') return 'Draft task';
+    if (actionType === 'more_info') return 'Tell me more';
+    if (actionType === 'skip') return 'Skip';
+    return 'Do it';
   }
 
   function actionFromNextStep(nextStep) {
@@ -1021,28 +1259,90 @@
     if (!state.histories.has(threadId)) {
       state.histories.set(threadId, []);
     }
-    const history = state.histories.get(threadId);
-    if (!history.length) {
-      insertThreadDivider(threadId);
-      const thread = state.lookup.get(threadId);
-      const intro = buildIntroMessage(thread);
-      if (intro) {
-        const turn = { role: 'assistant', content: intro };
-        history.push(turn);
-        state.timeline.push({ type: 'turn', threadId, turn });
-      }
-      if (thread) {
-        const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
-        if (action) setPendingSuggestedAction(threadId, action);
-      }
+    hydrateThreadTimeline(threadId);
+    logDebug('ensureHistory', threadId, {
+      historyLength: state.histories.get(threadId)?.length || 0
+    });
+    return state.histories.get(threadId);
+  }
+
+  function hydrateThreadTimeline(threadId) {
+    if (!threadId) return;
+    const hasTimelineEntries = state.timeline.some(item => item.threadId === threadId && item.type === 'transcript');
+    const hasDivider = state.timeline.some(item => item.threadId === threadId && item.type === 'divider');
+    const serverItems = state.serverTimelines.get(threadId) || [];
+    const alreadyHydrated = state.hydrated.has(threadId);
+    const isHydrating = state.hydrating.has(threadId);
+    logDebug('hydrateThreadTimeline', threadId, {
+      hasTimelineEntries,
+      hasDivider,
+      serverCount: serverItems.length,
+      alreadyHydrated,
+      isHydrating
+    });
+    if (alreadyHydrated && (hasTimelineEntries || !serverItems.length)) {
+      return;
     }
-    return history;
+    const thread = state.lookup.get(threadId);
+    if (!thread) return;
+    if (!hasDivider) insertThreadDivider(threadId);
+    if (serverItems.length) {
+      mergeServerTimeline(threadId, serverItems);
+      state.hydrated.add(threadId);
+      return;
+    }
+    if (!isHydrating) {
+      logDebug('hydrateThreadTimeline: fetching auto summary', threadId);
+      fetchAutoSummary(threadId);
+    }
+  }
+
+  function mergeServerTimeline(threadId, messages) {
+    if (!Array.isArray(messages) || !messages.length) return;
+    const ordered = messages.slice().sort((a, b) => {
+      const aTime = new Date(a.createdAt || '').getTime();
+      const bTime = new Date(b.createdAt || '').getTime();
+      return aTime - bTime;
+    });
+    ordered.forEach(msg => {
+      const id = typeof msg?.id === 'string' ? msg.id : '';
+      if (id && state.timelineMessageIds.has(id)) return;
+      if (id) state.timelineMessageIds.add(id);
+      const resolvedType = typeof msg.messageType === 'string' && msg.messageType
+        ? msg.messageType
+        : (typeof msg.type === 'string' ? msg.type : '');
+      if (resolvedType === 'suggested_action') {
+        const suggested = normalizeSuggestedAction(msg?.payload?.actionType);
+        if (suggested) setPendingSuggestedAction(threadId, suggested);
+      }
+      if (resolvedType === 'draft_details') {
+        setPendingCreate(threadId);
+      }
+      const entry = {
+        type: 'transcript',
+        id,
+        threadId,
+        messageType: resolvedType,
+        content: typeof msg.content === 'string' ? msg.content : '',
+        payload: msg.payload || {},
+        createdAt: msg.createdAt || ''
+      };
+      state.timeline.push(entry);
+    });
+    logDebug('mergeServerTimeline', {
+      threadId,
+      added: ordered.length,
+      totalTimeline: state.timeline.length,
+      ids: ordered.map(m => m.id || '(no id)'),
+      messageTypes: ordered.map(m => m.type)
+    });
   }
 
   function appendTurn(threadId, turn) {
     const history = ensureHistory(threadId);
     history.push(turn);
     state.timeline.push({ type: 'turn', threadId, turn });
+    logDebug('appendTurn', { threadId, role: turn.role, timelineLength: state.timeline.length });
     return history;
   }
 
@@ -1083,209 +1383,45 @@
     });
   }
 
-  function buildIntroMessage(thread) {
-    if (!thread) return 'Need a quick summary or a draft? I can help.';
-    const primer = (thread.primer || '').trim();
-    if (primer) return primer;
-
-    const status = getPrimerStatus(thread.threadId);
-    if (status === 'loading' || status === 'pending') return '';
-    if (status === 'error') {
-      return buildFallbackPrimer(thread);
-    }
-    return buildFallbackPrimer(thread);
-  }
-
-  function buildFallbackPrimer(thread) {
-    if (!thread) return 'Heads up: you have an email waiting.';
-    const sender = thread.from ? thread.from.split('<')[0].trim() || thread.from : '';
-    const subject = (thread.subject || '').trim();
-    const summary = (thread.summary || thread.headline || '').split('\n')[0]?.trim() || '';
-    const contextParts = [];
-    if (sender) contextParts.push(sender);
-    if (subject) contextParts.push(`about “${subject}”`);
-    let context = contextParts.join(' ');
-    if (summary) {
-      context = context ? `${context} — ${summary}` : summary;
-    }
-    context = context || 'an email that needs your call';
-    const starter = `Heads up: ${context}.`;
-    const normalizedNext = (thread.nextStep || '').trim();
-    const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
-    thread.suggestedAction = action;
-    const next = formatActionNudge(action, normalizedNext);
-    return `${starter} ${next}`;
-  }
-
-  function formatActionNudge(action, nextStep) {
-    if (action === 'archive') return 'Looks wrapped—want me to archive it?';
-    if (action === 'skip') return 'We can park this and move to the next email if you want.';
-    if (action === 'create_task') {
-      const detail = nextStep ? ` for "${nextStep}"` : '';
-      return `I can log a quick task${detail} so it doesn’t slip. Want that?`;
-    }
-    return 'Want me to pull a tighter rundown or key deadlines?';
-  }
-
-
-  function ensurePrimerFetch(threadId) {
-    const thread = state.lookup.get(threadId);
-    if (!thread || (thread.primer || '').trim()) return;
-    const status = getPrimerStatus(threadId);
-    if (status === 'loading' || status === 'pending') return;
-    setPrimerStatus(threadId, 'loading');
-    state.prepTyping = threadId;
-    fetchPrimer(threadId, 0);
-  }
-
-  function fetchPrimer(threadId, attempt) {
-    const nextAttempt = typeof attempt === 'number' ? attempt : 0;
-    fetch(`${PRIMER_ENDPOINT}/${encodeURIComponent(threadId)}`, {
-      headers: { 'Accept': 'application/json' }
-    }).then(async resp => {
-      if (resp.status === 202) {
-        if (nextAttempt >= MAX_PRIMER_POLLS) {
-          setPrimerStatus(threadId, 'error');
-          return;
-        }
-        setPrimerStatus(threadId, 'pending');
-        schedulePrimerRetry(threadId, nextAttempt + 1);
-        return;
-      }
-      if (!resp.ok) throw new Error('Unable to load primer');
-      const data = await resp.json().catch(() => ({}));
-      const primer = typeof data?.primer === 'string' ? data.primer.trim() : '';
-      const suggestedAction = normalizeSuggestedAction(data?.suggestedAction);
-      if (!primer) {
-        if (nextAttempt >= MAX_PRIMER_POLLS) {
-          setPrimerStatus(threadId, 'error');
-          return;
-        }
-        setPrimerStatus(threadId, 'pending');
-        schedulePrimerRetry(threadId, nextAttempt + 1);
-        return;
-      }
-      applyPrimerToThread(threadId, primer, suggestedAction);
-    }).catch(() => {
-      if (nextAttempt >= MAX_PRIMER_POLLS) {
-        setPrimerStatus(threadId, 'error');
-        return;
-      }
-      setPrimerStatus(threadId, 'pending');
-      schedulePrimerRetry(threadId, nextAttempt + 1);
-    });
-  }
-
-  function schedulePrimerRetry(threadId, attempt) {
-    clearPrimerRetry(threadId);
-    const timer = window.setTimeout(() => fetchPrimer(threadId, attempt), PRIMER_RETRY_DELAY);
-    primerRetryTimers.set(threadId, timer);
-  }
-
-  function clearPrimerRetry(threadId) {
-    if (!primerRetryTimers.has(threadId)) return;
-    window.clearTimeout(primerRetryTimers.get(threadId));
-    primerRetryTimers.delete(threadId);
-  }
-
-  function getPrimerStatus(threadId) {
-    return primerStatus.get(threadId) || 'idle';
-  }
-
-  function setPrimerStatus(threadId, status) {
-    primerStatus.set(threadId, status);
-    if (status === 'loading' || status === 'pending') {
-      state.prepTyping = threadId;
-    } else if (state.prepTyping === threadId) {
-      state.prepTyping = '';
-    }
-    const history = state.histories.get(threadId);
-    if (!history || !history.length) {
-      const thread = state.lookup.get(threadId);
-      if (thread && status !== 'loading' && status !== 'pending') {
-        const intro = buildIntroMessage(thread);
-        if (intro) {
-          insertThreadDivider(threadId);
-          const turn = { role: 'assistant', content: intro };
-          state.histories.set(threadId, [turn]);
-          state.timeline.push({ type: 'turn', threadId, turn });
-          const action = normalizeSuggestedAction(thread.suggestedAction) || guessSuggestedAction(thread);
-          if (action) setPendingSuggestedAction(threadId, action);
-        }
-      }
-      if (threadId === state.activeId) renderChat(threadId);
-      return;
-    }
-    const thread = state.lookup.get(threadId);
-    if (!thread || (thread.primer || '').trim()) return;
-    if (history[0]?.role === 'assistant') {
-      history[0].content = buildIntroMessage(thread);
-      if (threadId === state.activeId) {
-        renderChat(threadId);
-      }
-    }
-  }
-
-  function refreshPrepTyping(threadId) {
-    const status = getPrimerStatus(threadId);
-    if (status === 'loading' || status === 'pending') {
-      state.prepTyping = threadId;
-    } else if (state.prepTyping === threadId) {
-      state.prepTyping = '';
-    }
-  }
-
-  function applyPrimerToThread(threadId, primer, suggestedAction) {
-    clearPrimerRetry(threadId);
-    const thread = state.lookup.get(threadId);
-    if (!thread) return;
-    const action = normalizeSuggestedAction(suggestedAction) || thread.suggestedAction || guessSuggestedAction(thread);
-    thread.suggestedAction = action;
-    setPendingSuggestedAction(threadId, action);
-    thread.primer = primer;
-    const history = state.histories.get(threadId);
-    if (history && history.length && history[0]?.role === 'assistant') {
-      history[0].content = primer;
-    } else {
-      insertThreadDivider(threadId);
-      const turn = { role: 'assistant', content: primer };
-      state.histories.set(threadId, [turn]);
-      state.timeline.push({ type: 'turn', threadId, turn });
-    }
-    setPrimerStatus(threadId, 'ready');
-    if (state.prepTyping === threadId) {
-      state.prepTyping = '';
-    }
-    if (threadId === state.activeId) {
-      renderChat(threadId);
-    }
-  }
-
   function renderChat(threadId = state.activeId) {
     if (!refs.chatLog) return;
-    const timeline = state.timeline;
-    if (!timeline.length) {
-      const showTyping = (state.typing && threadId === state.activeId) || state.prepTyping === threadId;
-      let view = showTyping ? '' : chatPlaceholder();
-      if (showTyping) {
-        view += typingIndicatorHtml();
-      }
-      refs.chatLog.innerHTML = view;
-      return;
+    const timeline = state.timeline.slice();
+    logDebug('renderChat', {
+      threadId,
+      timelineCount: timeline.length,
+      items: timeline.map(t => ({
+        id: t.id,
+        type: t.type,
+        messageType: t.messageType,
+        createdAt: t.createdAt,
+        contentPreview: (t.content || '').slice(0, 80)
+      }))
+    });
+    let markup = timeline.map(renderTimelineEntry).join('');
+    logDebug('renderChat markup preview', markup.slice(0, 200));
+    if (!markup && !state.typing) {
+      markup = chatPlaceholder();
     }
-    let markup = timeline.map(entry => {
-      if (entry.type === 'divider') {
-        const label = htmlEscape(entry.label || 'New email thread');
-        const sender = htmlEscape(entry.sender || '');
-        const subject = htmlEscape(entry.subject || '');
-        const timestamp = entry.receivedAt ? formatTimestamp(entry.receivedAt) : '';
-        const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
-        const initials = initialsFromSender(entry.sender || entry.label || '');
-        const link = entry.link ? escapeAttribute(entry.link) : '';
-        const linkHtml = link
-          ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
-          : '';
-        return `
+    if (state.typing && threadId === state.activeId) {
+      markup += typingIndicatorHtml();
+    }
+    refs.chatLog.innerHTML = markup;
+    if (refs.chatScroll) refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+  }
+
+  function renderTimelineEntry(entry) {
+    if (entry.type === 'divider') {
+      const label = htmlEscape(entry.label || 'New email thread');
+      const sender = htmlEscape(entry.sender || '');
+      const subject = htmlEscape(entry.subject || '');
+      const timestamp = entry.receivedAt ? formatTimestamp(entry.receivedAt) : '';
+      const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
+      const initials = initialsFromSender(entry.sender || entry.label || '');
+      const link = entry.link ? escapeAttribute(entry.link) : '';
+      const linkHtml = link
+        ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
+        : '';
+      return `
           <div class="chat-divider">
             <span class="chat-divider-line" aria-hidden="true"></span>
             <div class="chat-divider-card">
@@ -1299,18 +1435,78 @@
             <span class="chat-divider-line" aria-hidden="true"></span>
           </div>
         `;
-      }
+    }
+    if (entry.type === 'turn') {
       const turn = entry.turn;
       if (turn.role === 'assistant') {
         return `<div class="chat-message assistant"><div class="chat-card">${renderAssistantMarkdown(turn.content)}</div></div>`;
       }
       return `<div class="chat-message user"><div class="chat-card">${renderPlainText(turn.content, { preserveLineBreaks: true })}</div></div>`;
-    }).join('');
-    if (state.typing && threadId === state.activeId) {
-      markup += typingIndicatorHtml();
     }
-    refs.chatLog.innerHTML = markup;
-    if (refs.chatScroll) refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+    if (entry.type === 'transcript') {
+      return renderTranscriptEntry(entry);
+    }
+    return '';
+  }
+
+  function renderTranscriptEntry(entry) {
+    const actionFlow = state.actionFlows.get(entry.threadId);
+    if (!entry.messageType) {
+      logDebug('renderTranscriptEntry missing messageType', entry);
+    }
+    if (entry.messageType === 'must_know') {
+      return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Must know</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+    }
+    if (entry.messageType === 'suggested_action') {
+      const actionType = normalizeSuggestedAction(entry?.payload?.actionType) || '';
+      const disabled = actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip';
+      const label = suggestedActionLabel(actionType);
+      return `<div class="chat-message assistant">
+        <div class="chat-card suggested-card">
+          <p class="chat-badge">Suggested action</p>
+          <p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>
+          <div class="suggested-actions">
+            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(actionType)}" ${disabled ? 'disabled' : ''}>${label}</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (entry.messageType === 'draft_details') {
+      const draft = normalizeDraftPayload(entry.payload);
+      const due = draft.dueDate ? `Due ${formatFriendlyDate(draft.dueDate)}` : 'No due date';
+      return `<div class="chat-message assistant">
+        <div class="chat-card draft-card" data-thread-id="${escapeAttribute(entry.threadId)}">
+          <p class="chat-badge">Task draft</p>
+          <p><strong>Title:</strong> ${htmlEscape(draft.title || 'New task')}</p>
+          <p><strong>Notes:</strong> ${htmlEscape(draft.notes || 'None')}</p>
+          <p><strong>Due:</strong> ${htmlEscape(due)}</p>
+          <div class="suggested-actions">
+            <button type="button" data-action="draft-create" data-thread-id="${escapeAttribute(entry.threadId)}">Create task</button>
+            <button type="button" data-action="draft-edit" data-thread-id="${escapeAttribute(entry.threadId)}">Edit</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (entry.messageType === 'inline_editor') {
+      const draft = normalizeDraftPayload(entry.payload);
+      const editorId = entry.id || `${entry.threadId}-editor`;
+      return `<div class="chat-message assistant">
+        <div class="chat-card draft-editor" data-editor-id="${escapeAttribute(editorId)}" data-thread-id="${escapeAttribute(entry.threadId)}">
+          <p class="chat-badge">Edit task</p>
+          <div class="task-field"><label>Title</label><input type="text" data-field="title" value="${escapeAttribute(draft.title || '')}" /></div>
+          <div class="task-field"><label>Notes</label><textarea data-field="notes">${htmlEscape(draft.notes || '')}</textarea></div>
+          <div class="task-field"><label>Due date</label><input type="date" data-field="dueDate" value="${escapeAttribute(draft.dueDate || '')}" /></div>
+          <div class="suggested-actions">
+            <button type="button" data-action="editor-create" data-editor-id="${escapeAttribute(editorId)}" data-thread-id="${escapeAttribute(entry.threadId)}">Create task</button>
+            <button type="button" data-action="editor-save" data-editor-id="${escapeAttribute(editorId)}" data-thread-id="${escapeAttribute(entry.threadId)}">Save draft</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (entry.messageType === 'action_result') {
+      return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Result</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+    }
+    return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">${htmlEscape(entry.messageType || 'Note')}</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
   }
 
   function chatPlaceholder() {
@@ -1366,17 +1562,17 @@
     }
   }
 
-  function setPendingSuggestedAction(threadId, action) {
-    const normalized = normalizeSuggestedAction(action);
+  function setPendingSuggestedAction(threadId, actionType) {
+    const normalized = normalizeSuggestedAction(actionType);
     if (!threadId || !normalized) return;
     state.pendingSuggestedActions.set(threadId, normalized);
+    logDebug('setPendingSuggestedAction', { threadId, actionType: normalized });
   }
-
   function clearPendingSuggestedAction(threadId = state.activeId) {
     if (!threadId) return;
     state.pendingSuggestedActions.delete(threadId);
+    logDebug('clearPendingSuggestedAction', { threadId });
   }
-
   function getPendingSuggestedAction(threadId = state.activeId) {
     if (!threadId) return '';
     return state.pendingSuggestedActions.get(threadId) || '';
@@ -1528,6 +1724,17 @@
     setActiveThread(nextId);
   }
 
+  function advanceToNextThread(threadId = state.activeId) {
+    if (!threadId || !state.needs.length) return;
+    const index = state.needs.indexOf(threadId);
+    if (index === -1) return;
+    const nextIndex = state.needs.length > 1 ? (index + 1) % state.needs.length : -1;
+    const nextId = nextIndex >= 0 ? state.needs[nextIndex] : '';
+    if (nextId && nextId !== threadId) {
+      setActiveThread(nextId);
+    }
+  }
+
   function skipCurrent(source) {
     if (!state.activeId) return;
     const threadId = state.activeId;
@@ -1599,19 +1806,7 @@
 
   function handleCreateTaskIntent() {
     if (!state.activeId) return;
-    const thread = state.lookup.get(state.activeId);
-    if (!thread) return;
-    const alreadyPending = isCreateConfirmationPending(state.activeId);
-    openTaskPanel({ preserveValues: alreadyPending && taskState.open });
-    setPendingCreate(state.activeId);
-    taskState.status = 'idle';
-    taskState.error = '';
-    renderTaskPanel();
-
-    const prompt = alreadyPending ? 'Please confirm: create the task as shown? (yes/no)' : buildTaskConfirmationPrompt();
-    appendTurn(state.activeId, { role: 'assistant', content: prompt });
-    renderChat();
-    updateHint(state.activeId);
+    requestDraft(state.activeId, 'generate');
   }
 
   async function handleMoreInfoIntent() {
@@ -1625,21 +1820,24 @@
     const normalized = (userText || '').trim().toLowerCase();
 
     if (isAffirmativeResponse(normalized)) {
-      clearPendingSuggestedAction(state.activeId);
       if (action === 'archive') {
-        await handleArchiveIntent(userText, { alreadyLogged: true });
+        clearPendingSuggestedAction(state.activeId);
+        await executeActionForThread(state.activeId, 'archive');
         return true;
       }
       if (action === 'skip') {
-        handleAutoIntent('skip', userText, { alreadyLogged: true });
+        clearPendingSuggestedAction(state.activeId);
+        await executeActionForThread(state.activeId, 'skip');
         return true;
       }
       if (action === 'create_task') {
+        clearPendingSuggestedAction(state.activeId);
         handleCreateTaskIntent();
         return true;
       }
       if (action === 'more_info') {
-        await handleMoreInfoIntent();
+        clearPendingSuggestedAction(state.activeId);
+        await executeActionForThread(state.activeId, 'more_info');
         return true;
       }
     }
@@ -1654,12 +1852,12 @@
     const intent = await detectIntent(userText);
     if (intent === 'archive') {
       clearPendingSuggestedAction(state.activeId);
-      await handleArchiveIntent(userText, { alreadyLogged: true });
+      await executeActionForThread(state.activeId, 'archive');
       return true;
     }
     if (intent === 'skip') {
       clearPendingSuggestedAction(state.activeId);
-      handleAutoIntent('skip', userText, { alreadyLogged: true });
+      await executeActionForThread(state.activeId, 'skip');
       return true;
     }
     if (intent === 'create_task') {
@@ -1677,8 +1875,13 @@
   async function handleCreateConfirmationResponse(userText) {
     if (!state.activeId || !isCreateConfirmationPending(state.activeId)) return;
     const normalized = (userText || '').trim().toLowerCase();
+    const flow = state.actionFlows.get(state.activeId);
 
     if (isAffirmativeResponse(normalized)) {
+      if (flow?.actionType === 'create_task') {
+        await executeActionForThread(state.activeId, 'create_task');
+        return;
+      }
       const result = await submitTask();
       if (result?.ok) {
         appendTurn(state.activeId, { role: 'assistant', content: buildTaskCreatedMessage(result) });

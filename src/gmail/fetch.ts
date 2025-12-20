@@ -6,6 +6,7 @@ import { prisma } from '../store/db.js';
 import type { gmail_v1 } from 'googleapis';
 import type { GaxiosResponse } from 'gaxios';
 import type { OAuth2Client } from 'google-auth-library';
+import { ensureAutoSummaryCards } from '../actions/persistence.js';
 
 const THREAD_BATCH_SIZE = 20;
 
@@ -177,6 +178,22 @@ async function summarizeAndStore(
       confidence: s.confidence
     }
   });
+
+  try {
+    await ensureAutoSummaryCards({
+      userId,
+      threadId,
+      lastMessageId: lastMsgId,
+      subject,
+      headline: (s as any).headline || '',
+      summary: s.tldr,
+      nextStep: s.next_step,
+      participants: people,
+      transcript: convoText
+    });
+  } catch (err) {
+    console.error('failed to build auto summary cards', err);
+  }
 
   // Keep only the freshest summary per thread to avoid duplicating entries during repeated syncs.
   await prisma.summary.deleteMany({

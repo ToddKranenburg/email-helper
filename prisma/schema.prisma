@@ -23,6 +23,8 @@ model User {
   summaries   Summary[]
   processings Processing[]
   googleToken GoogleToken?
+  actionFlows ActionFlow[]
+  transcripts TranscriptMessage[]
 }
 
 model Thread {
@@ -38,6 +40,8 @@ model Thread {
   updatedAt    DateTime     @updatedAt
   summaries    Summary[]
   processings  Processing[]
+  actionFlows  ActionFlow[]
+  transcripts  TranscriptMessage[]
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([id, userId])
@@ -85,4 +89,35 @@ model GoogleToken {
   expiryDate   DateTime?
   updatedAt    DateTime @updatedAt
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ActionFlow {
+  id            String      @id @default(cuid())
+  userId        String
+  threadId      String
+  actionType    String
+  state         String      @default("suggested")
+  draftPayload  String?
+  lastMessageId String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thread        Thread      @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
+
+  @@unique([userId, threadId])
+  @@index([threadId, userId, updatedAt])
+}
+
+model TranscriptMessage {
+  id        String         @id @default(cuid())
+  userId    String
+  threadId  String
+  type      String
+  content   String
+  payload   String?
+  createdAt DateTime       @default(now())
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thread    Thread         @relation(fields: [threadId, userId], references: [id, userId], onDelete: Cascade)
+
+  @@index([threadId, userId, createdAt])
 }

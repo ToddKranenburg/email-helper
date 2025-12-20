@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { prisma } from '../store/db.js';
-import { generateChatPrimers, type ChatPrimerInput, type PrimerOutput, type SuggestedAction } from '../llm/chatPrimer.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
@@ -11,15 +10,24 @@ import { normalizeBody } from '../gmail/normalize.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
-import type { Summary, Thread } from '@prisma/client';
+import type { Summary, Thread, ActionFlow, TranscriptMessage } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
-import { createGoogleTask } from '../tasks/createTask.js';
+import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
+import {
+  ensureAutoSummaryCards,
+  fetchTimeline,
+  generateDraftDetails,
+  openInlineEditor,
+  saveEditedDraft,
+  appendActionResult,
+  serializeTimelineMessages,
+  type ActionType,
+  type ActionState,
+  type TimelineMessage
+} from '../actions/persistence.js';
 
 export const router = Router();
 const PAGE_SIZE = 20;
-const PRIMER_BACKGROUND_BATCH = 6;
-const primerCache = new Map<string, PrimerOutput>();
-const primerPending = new Map<string, Promise<PrimerOutput>>();
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
@@ -72,6 +80,23 @@ function handleMissingScopeError(err: unknown, sessionData: any, res: Response) 
   return true;
 }
 
+function handleInsufficientScopeFromGaxios(err: unknown, sessionData: any, res: Response) {
+  const gaxios = err instanceof GaxiosError ? err : undefined;
+  if (!gaxios) return false;
+  const header = gaxios.response?.headers?.['www-authenticate'];
+  const authHeader = Array.isArray(header) ? header.join(' ') : header;
+  if (typeof authHeader !== 'string' || !authHeader.includes('insufficient_scope')) return false;
+  const scopeMatch = authHeader.match(/scope="([^"]+)"/);
+  const scopeList = scopeMatch?.[1] ? scopeMatch[1].split(/\s+/).filter(Boolean) : [];
+  clearGoogleSession(sessionData);
+  res.status(403).json({
+    error: 'Google permissions changed. Please reconnect your Google account to continue.',
+    missingScopes: scopeList,
+    reconnectUrl: '/auth/google'
+  });
+  return true;
+}
+
 router.get('/', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   const tokens = sessionData.googleTokens;
@@ -93,8 +118,23 @@ type PageMeta = {
 };
 
 type SummaryWithThread = Summary & { Thread: Thread | null };
-type DecoratedSummary = SummaryWithThread & { chatPrimer?: string; chatSuggestedAction?: SuggestedAction };
 type ThreadContext = { summary: SummaryWithThread; transcript: string; participants: string[] };
+type SecretaryThread = {
+  threadId: string;
+  messageId: string;
+  headline: string;
+  from: string;
+  subject: string;
+  summary: string;
+  nextStep: string;
+  link: string;
+  category: string;
+  receivedAt: string;
+  convo: string;
+  participants: string[];
+  actionFlow: ActionFlow | null;
+  timeline: TimelineMessage[];
+};
 
 router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
@@ -123,8 +163,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
-  const primerInputs = pageData.items.map(buildPrimerInputFromSummary);
-  const decorated = decorateSummariesWithPrimers(userId, pageData.items);
+  const threads = await buildThreadsPayload(userId, pageData.items);
 
   // Inject a small flag the client script can read to auto-trigger ingest
   const renderStart = performance.now();
@@ -135,14 +174,13 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     hasMore: pageData.hasMore,
     nextPage: pageData.nextPage
   };
-  const withFlag = `${render(body, decorated, pageMeta)}
+  const withFlag = `${render(body, threads, pageMeta)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
   log('html rendered', { durationMs: elapsedMs(renderStart) });
   res.send(html);
   log('completed', { durationMs: elapsedMs(routeStart) });
-  queuePrimerPrefetch(userId, primerInputs, traceId);
 });
 
 router.post('/ingest', async (req: Request, res: Response) => {
@@ -222,6 +260,38 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/secretary/auto-summarize', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  if (ensureScopesForApi(sessionData, res)) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
+
+  try {
+    const ensured = await ensureAutoSummaryCards({
+      userId: sessionData.user.id,
+      threadId,
+      lastMessageId: context.summary.lastMsgId,
+      subject: context.summary.Thread?.subject || '',
+      headline: context.summary.headline,
+      summary: context.summary.tldr,
+      nextStep: context.summary.nextStep,
+      participants: context.participants,
+      transcript: context.transcript
+    });
+    const timeline = await fetchTimeline(sessionData.user.id, threadId);
+    return res.json({ flow: ensured.flow, timeline });
+  } catch (err) {
+    console.error('auto summarize failed', err);
+    return res.status(500).json({ error: 'Unable to prepare this email right now. Please try again.' });
+  }
+});
+
 router.post('/secretary/review', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) {
@@ -289,42 +359,233 @@ router.post('/secretary/intent', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/secretary/primer/:threadId', async (req: Request, res: Response) => {
+router.post('/secretary/action/draft', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) {
     return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
   if (ensureScopesForApi(sessionData, res)) return;
-  const userId = sessionData.user.id;
-  const rawId = typeof req.params.threadId === 'string' ? req.params.threadId : '';
-  const threadId = rawId.trim();
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
   if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+  const mode = req.body?.mode === 'edit' ? 'edit' : req.body?.mode === 'save' ? 'save' : 'generate';
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
 
-  const cached = getCachedPrimer(userId, threadId);
-  if (cached) {
-    return res.json({ primer: cached.prompt, suggestedAction: cached.suggestedAction, status: 'ready' });
+  try {
+    let flow: ActionFlow | null = null;
+    if (mode === 'edit') {
+      const edited = await openInlineEditor(sessionData.user.id, threadId);
+      flow = edited.flow;
+    } else if (mode === 'save') {
+      const draft = normalizeDraftInput(req.body?.draft);
+      const saved = await saveEditedDraft(sessionData.user.id, threadId, draft);
+      flow = saved.flow;
+    } else {
+      const generated = await generateDraftDetails({
+        userId: sessionData.user.id,
+        threadId,
+        subject: context.summary.Thread?.subject || '',
+        headline: context.summary.headline,
+        summary: context.summary.tldr,
+        nextStep: context.summary.nextStep,
+        transcript: context.transcript,
+        lastMessageId: context.summary.lastMsgId
+      });
+      flow = generated.flow;
+    }
+    const timeline = await fetchTimeline(sessionData.user.id, threadId);
+    return res.json({ flow, timeline });
+  } catch (err) {
+    console.error('action draft failed', err);
+    return res.status(500).json({ error: 'Unable to prepare the draft right now. Please try again.' });
   }
+});
 
-  const pending = primerPending.get(primerCacheKey(userId, threadId));
-  if (pending) {
-    const primer = await pending.catch(() => null);
-    if (primer?.prompt) return res.json({ primer: primer.prompt, suggestedAction: primer.suggestedAction, status: 'ready' });
-    return res.status(202).json({ primer: '', suggestedAction: '', status: 'pending' });
+router.post('/secretary/action/execute', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
   }
+  if (ensureScopesForApi(sessionData, res)) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+  const actionType = normalizeActionTypeInput(req.body?.actionType || req.body?.action_type);
+  if (!actionType) return res.status(400).json({ error: 'Unsupported action type.' });
 
-  const summary = await prisma.summary.findFirst({
-    where: { userId, threadId },
-    include: { Thread: true }
-  });
-  if (!summary) return res.status(404).json({ error: 'Email summary not found.' });
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
 
-  const traceId = createTraceId();
-  const input = buildPrimerInputFromSummary(summary as SummaryWithThread);
-  const primer = await fetchPrimerForThread(userId, input, traceId);
-  if (primer?.prompt) {
-    return res.json({ primer: primer.prompt, suggestedAction: primer.suggestedAction, status: 'ready' });
+  try {
+    if (actionType === 'archive') {
+      const auth = getAuthedClient(sessionData);
+      const gmail = gmailClient(auth);
+      await gmail.users.threads.modify({
+        userId: 'me',
+        id: threadId,
+        requestBody: { removeLabelIds: ['INBOX'] }
+      });
+      await prisma.summary.deleteMany({ where: { userId: sessionData.user.id, threadId } });
+      const flow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+      await appendActionResult(sessionData.user.id, threadId, 'Archived in Gmail.');
+      const timeline = await fetchTimeline(sessionData.user.id, threadId);
+      return res.json({ status: 'archived', flow, timeline });
+    }
+
+    if (actionType === 'skip') {
+      const flow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+      await appendActionResult(sessionData.user.id, threadId, 'Skipped. No new suggestions until this thread changes.');
+      const timeline = await fetchTimeline(sessionData.user.id, threadId);
+      return res.json({ status: 'skipped', flow, timeline });
+    }
+
+    if (actionType === 'more_info') {
+      const reply = await chatAboutEmail({
+        subject: context.summary.Thread?.subject || '',
+        headline: context.summary.headline,
+        tldr: context.summary.tldr,
+        nextStep: context.summary.nextStep,
+        participants: context.participants,
+        transcript: context.transcript,
+        history: [],
+        question: 'Share extra context and clarifications about this email. List any open questions or missing details.'
+      });
+      const flow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'suggested',
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'suggested',
+          lastMessageId: context.summary.lastMsgId,
+          draftPayload: null
+        }
+      });
+      await appendActionResult(sessionData.user.id, threadId, reply);
+      const timeline = await fetchTimeline(sessionData.user.id, threadId);
+      return res.json({ status: 'ok', flow, timeline });
+    }
+
+    if (actionType === 'create_task') {
+      const draftInput = normalizeDraftInput(req.body?.draft);
+      const existingFlow = await prisma.actionFlow.findUnique({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } }
+      });
+      const draft = selectDraftPayload(draftInput, existingFlow?.draftPayload, context);
+      if (!draft.title.trim()) {
+        return res.status(400).json({ error: 'Add a task title before creating.' });
+      }
+
+      const executingFlow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'executing',
+          draftPayload: encodeDraft(draft),
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'executing',
+          draftPayload: encodeDraft(draft),
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+
+      try {
+        const auth = getAuthedClient(sessionData);
+        const task = await createGoogleTask(auth, {
+          title: draft.title,
+          notes: draft.notes,
+          due: normalizeDueDate(draft.dueDate || undefined)
+        });
+        const listId = extractTaskListId(task);
+        const taskUrl = buildTasksLink(task.id, listId);
+        const completedFlow = await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'completed', draftPayload: encodeDraft(draft) }
+        });
+        await appendActionResult(sessionData.user.id, threadId, buildTaskResultMessage({
+          title: task.title || draft.title,
+          due: task.due ?? draft.dueDate,
+          url: taskUrl
+        }), {
+          taskId: task.id,
+          taskUrl
+        });
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.json({
+          status: 'created',
+          taskId: task.id,
+          taskUrl,
+          flow: completedFlow,
+          timeline
+        });
+      } catch (err) {
+        if (handleMissingScopeError(err, sessionData, res)) return;
+        if (handleInsufficientScopeFromGaxios(err, sessionData, res)) return;
+        await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'failed' }
+        });
+        console.error('Failed to create Google Task', err);
+        const message = err instanceof Error ? err.message : 'Unable to create that task right now.';
+        await appendActionResult(sessionData.user.id, threadId, `Task creation failed: ${message}`);
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.status(500).json({ error: 'Unable to create that task right now.', timeline });
+      }
+    }
+
+    return res.status(400).json({ error: 'Unsupported action type.' });
+  } catch (err) {
+    if (handleMissingScopeError(err, sessionData, res)) return;
+    const gaxios = err instanceof GaxiosError ? err : undefined;
+    const reason = gaxios?.response?.status === 403
+      ? 'Google blocked this request. Please reconnect Google and try again.'
+      : 'Unable to process that action right now. Please try again.';
+    console.error('action execute failed', err);
+    return res.status(500).json({ error: reason });
   }
-  return res.status(202).json({ primer: '', suggestedAction: '', status: 'pending' });
 });
 
 router.get('/api/threads', async (req: Request, res: Response) => {
@@ -352,10 +613,9 @@ router.get('/api/threads', async (req: Request, res: Response) => {
 
     const pageData = await loadPage(userId, targetPage, { assumeMore: Boolean(ingestResult?.hasMore) });
     log('page ready', { page: pageData.currentPage, returned: pageData.items.length });
-    const decorated = decorateSummariesWithPrimers(userId, pageData.items);
-    queuePrimerPrefetch(userId, pageData.items.map(buildPrimerInputFromSummary), traceId);
+    const threads = await buildThreadsPayload(userId, pageData.items);
     return res.json({
-      threads: summariesToThreads(decorated),
+      threads,
       meta: {
         totalItems: pageData.totalItems,
         pageSize: PAGE_SIZE,
@@ -508,36 +768,76 @@ async function loadPageWithOpts(userId: string, requestedPage: number, opts: { a
   return { items, totalItems, totalPages, currentPage, hasMore, nextPage };
 }
 
-function decorateSummariesWithPrimers(userId: string, items: SummaryWithThread[]): DecoratedSummary[] {
-  return items.map(item => {
-    const cached = getCachedPrimer(userId, item.threadId);
-    return {
-      ...item,
-      chatPrimer: cached?.prompt || '',
-      chatSuggestedAction: cached?.suggestedAction
-    };
-  });
-}
+async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): Promise<SecretaryThread[]> {
+  const threadIds = items.map(item => item.threadId);
+  const [flows, transcripts] = await Promise.all([
+    prisma.actionFlow.findMany({
+      where: { userId, threadId: { in: threadIds } }
+    }),
+    prisma.transcriptMessage.findMany({
+      where: { userId, threadId: { in: threadIds } },
+      orderBy: { createdAt: 'asc' }
+    })
+  ]);
 
-function summariesToThreads(items: DecoratedSummary[]): SecretaryEmail[] {
-  return items.map(x => {
-    const emailTs = x.Thread?.lastMessageTs ? new Date(x.Thread.lastMessageTs) : new Date(x.createdAt);
-    return {
-      threadId: x.threadId,
-      messageId: x.lastMsgId || '',
-      headline: x.headline || '',
-      from: formatSender(x.Thread),
-      subject: x.Thread?.subject || '(no subject)',
-      summary: x.tldr || '',
-      nextStep: x.nextStep || '',
-      link: x.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(x.threadId)}` : '',
-      primer: x.chatPrimer || '',
-      suggestedAction: x.chatSuggestedAction || '',
-      category: x.category || '',
+  const flowMap = new Map<string, ActionFlow>();
+  for (const flow of flows) {
+    flowMap.set(flow.threadId, flow);
+  }
+
+  const transcriptMap = new Map<string, TranscriptMessage[]>();
+  for (const msg of transcripts) {
+    const bucket = transcriptMap.get(msg.threadId) || [];
+    bucket.push(msg);
+    transcriptMap.set(msg.threadId, bucket);
+  }
+
+  const threads: SecretaryThread[] = [];
+  for (const item of items) {
+    const participants = parseParticipants(item.Thread?.participants);
+    const emailTs = item.Thread?.lastMessageTs ? new Date(item.Thread.lastMessageTs) : new Date(item.createdAt);
+    let timeline = serializeTimelineMessages(transcriptMap.get(item.threadId) || []);
+    let flow = flowMap.get(item.threadId) || null;
+
+    if (!timeline.length) {
+      try {
+        const ensured = await ensureAutoSummaryCards({
+          userId,
+          threadId: item.threadId,
+          lastMessageId: item.lastMsgId,
+          subject: item.Thread?.subject || '',
+          headline: item.headline,
+          summary: item.tldr,
+          nextStep: item.nextStep,
+          participants,
+          transcript: item.convoText || ''
+        });
+        timeline = ensured.messages;
+        flow = ensured.flow;
+      } catch (err) {
+        console.error('failed to ensure auto summaries for thread', { threadId: item.threadId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    threads.push({
+      threadId: item.threadId,
+      messageId: item.lastMsgId || '',
+      headline: item.headline || '',
+      from: formatSender(item.Thread),
+      subject: item.Thread?.subject || '(no subject)',
+      summary: item.tldr || '',
+      nextStep: item.nextStep || '',
+      link: item.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(item.threadId)}` : '',
+      category: item.category || '',
       receivedAt: emailTs.toISOString(),
-      convo: x.convoText || ''
-    };
-  });
+      convo: item.convoText || '',
+      participants,
+      actionFlow: flow || null,
+      timeline
+    });
+  }
+
+  return threads;
 }
 
 function emojiForCategory(cat: string): string {
@@ -553,31 +853,14 @@ function emojiForCategory(cat: string): string {
   return '📎';
 }
 
-type SecretaryEmail = {
-  threadId: string;
-  messageId: string;
-  headline: string;
-  from: string;
-  subject: string;
-  summary: string;
-  nextStep: string;
-  link: string;
-  primer: string;
-  suggestedAction: SuggestedAction | '';
-  category: string;
-  receivedAt: string;
-  convo: string;
-};
-
-function render(tpl: string, items: DecoratedSummary[], meta: PageMeta) {
+function render(tpl: string, items: SecretaryThread[], meta: PageMeta) {
   const secretaryScript = renderSecretaryAssistant(items, meta);
   return `${tpl}\n${secretaryScript}`;
 }
 
-function renderSecretaryAssistant(items: DecoratedSummary[], meta: PageMeta) {
-  const threads = summariesToThreads(items);
+function renderSecretaryAssistant(items: SecretaryThread[], meta: PageMeta) {
   const payload = safeJson({
-    threads,
+    threads: items,
     maxTurns: MAX_CHAT_TURNS,
     totalItems: meta.totalItems,
     pageSize: meta.pageSize,
@@ -609,6 +892,18 @@ function formatSender(thread?: { fromName?: string | null; fromEmail?: string | 
   if (name && email) return `${name} <${email}>`;
   if (name) return name;
   return `<${email}>`;
+}
+
+function formatFriendlyDate(raw?: string | null) {
+  if (!raw) return '';
+  const iso = raw.length === 10 ? `${raw}T00:00:00Z` : raw;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  if (parsed.getFullYear() !== new Date().getFullYear()) {
+    opts.year = 'numeric';
+  }
+  return parsed.toLocaleDateString(undefined, opts);
 }
 
 function normalizeHistory(raw: any): ChatTurn[] {
@@ -674,6 +969,76 @@ function parseParticipants(raw?: string | null): string[] {
   return [];
 }
 
+function normalizeActionTypeInput(raw: unknown): ActionType | null {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip') {
+    return value as ActionType;
+  }
+  return null;
+}
+
+function normalizeDraftInput(raw: any): { title: string; notes: string; dueDate: string | null } {
+  const title = typeof raw?.title === 'string' ? raw.title.trim() : '';
+  const notes = typeof raw?.notes === 'string' ? raw.notes.trim() : '';
+  const due = typeof raw?.dueDate === 'string'
+    ? raw.dueDate.trim()
+    : typeof raw?.due === 'string'
+      ? raw.due.trim()
+      : '';
+  return {
+    title,
+    notes,
+    dueDate: due || null
+  };
+}
+
+function selectDraftPayload(
+  inputDraft: { title: string; notes: string; dueDate: string | null },
+  existingPayload: any,
+  context: ThreadContext
+) {
+  const parsedExisting = parseDraftPayload(existingPayload);
+  const existing = typeof parsedExisting === 'object' && parsedExisting !== null ? parsedExisting : {};
+  const title = inputDraft.title || String(existing.title || context.summary.headline || context.summary.tldr || context.summary.Thread?.subject || 'New task');
+  const notes = inputDraft.notes ?? String(existing.notes || context.summary.tldr || '');
+  const dueDate = inputDraft.dueDate ?? (typeof existing.dueDate === 'string' ? existing.dueDate : null);
+  return {
+    title: title.trim(),
+    notes: notes.trim(),
+    dueDate: dueDate || null
+  };
+}
+
+function buildTaskResultMessage(input: { title?: string | null; due?: string | null; url?: string | null }) {
+  const bits = ['✅ Task created'];
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  if (title) bits.push(title);
+  const dueLabel = formatFriendlyDate(input.due);
+  if (dueLabel) bits.push(`Due ${dueLabel}`);
+  if (input.url) bits.push(`[Open in Google Tasks](${input.url})`);
+  return bits.join(' — ');
+}
+
+function encodeDraft(draft: { title: string; notes: string; dueDate: string | null }) {
+  try {
+    return JSON.stringify(draft);
+  } catch {
+    return null;
+  }
+}
+
+function parseDraftPayload(raw: any) {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return typeof raw === 'object' ? raw : {};
+}
+
 async function ensureUserRecord(sessionData: any) {
   const user = sessionData?.user;
   if (!user?.id || !user?.email) return;
@@ -693,93 +1058,6 @@ async function ensureUserRecord(sessionData: any) {
       lastActiveAt: new Date()
     }
   });
-}
-
-function buildPrimerInputFromSummary(item: SummaryWithThread): ChatPrimerInput {
-  return {
-    threadId: item.threadId,
-    subject: item.Thread?.subject || '',
-    summary: item.tldr || '',
-    nextStep: item.nextStep || '',
-    headline: item.headline || '',
-    fromLine: formatSender(item.Thread)
-  };
-}
-
-function queuePrimerPrefetch(userId: string, inputs: ChatPrimerInput[], traceId: string) {
-  const work = inputs.filter(item => shouldGeneratePrimer(userId, item.threadId));
-  if (!work.length) return;
-  const log = scopedLogger(`primerPrefetch:${traceId}`);
-  const batches = chunkArray(work, PRIMER_BACKGROUND_BATCH);
-  log('queueing background primer generation', { count: work.length, batches: batches.length });
-  let chain = Promise.resolve();
-  batches.forEach((batch, index) => {
-    const batchTrace = `${traceId}-bg${index + 1}`;
-    const batchPromise = chain.then(() => runPrimerBatch(userId, batch, batchTrace));
-    for (const input of batch) {
-      const key = primerCacheKey(userId, input.threadId);
-      const perThread = batchPromise
-        .then(result => result[input.threadId] || { prompt: '', suggestedAction: 'more_info' as SuggestedAction })
-        .finally(() => primerPending.delete(key));
-      primerPending.set(key, perThread);
-    }
-    chain = batchPromise.then(() => undefined).catch(() => undefined);
-  });
-}
-
-async function fetchPrimerForThread(userId: string, input: ChatPrimerInput, traceId: string) {
-  const existing = getCachedPrimer(userId, input.threadId);
-  if (existing) return existing;
-  const key = primerCacheKey(userId, input.threadId);
-  if (primerPending.has(key)) {
-    return primerPending.get(key)!;
-  }
-  const batchPromise = runPrimerBatch(userId, [input], traceId);
-  const perThread = batchPromise
-    .then(result => result[input.threadId] || { prompt: '', suggestedAction: 'more_info' as SuggestedAction })
-    .finally(() => primerPending.delete(key));
-  primerPending.set(key, perThread);
-  return perThread;
-}
-
-function runPrimerBatch(userId: string, inputs: ChatPrimerInput[], traceId: string): Promise<Record<string, PrimerOutput>> {
-  const log = scopedLogger(`primerBatch:${traceId}`);
-  return generateChatPrimers(inputs, { traceId }).then(result => {
-    cachePrimerResults(userId, result);
-    return result;
-  }).catch(err => {
-    log('failed to generate primers', { error: (err as Error).message || err });
-    return {} as Record<string, PrimerOutput>;
-  });
-}
-
-function cachePrimerResults(userId: string, primers: Record<string, PrimerOutput>) {
-  for (const [threadId, primer] of Object.entries(primers)) {
-    if (!primer?.prompt) continue;
-    primerCache.set(primerCacheKey(userId, threadId), primer);
-  }
-}
-
-function getCachedPrimer(userId: string, threadId: string) {
-  return primerCache.get(primerCacheKey(userId, threadId)) || null;
-}
-
-function shouldGeneratePrimer(userId: string, threadId: string) {
-  const key = primerCacheKey(userId, threadId);
-  return threadId && !primerCache.has(key) && !primerPending.has(key);
-}
-
-function primerCacheKey(userId: string, threadId: string) {
-  return `${userId}:${threadId}`;
-}
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  if (size <= 0) return [items.slice()];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
 }
 
 function scopedLogger(scope: string) {
