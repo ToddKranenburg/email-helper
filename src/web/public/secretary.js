@@ -7,6 +7,13 @@
   const NEXT_PAGE = typeof bootstrap.nextPage === 'number' ? bootstrap.nextPage : (HAS_MORE ? 2 : 0);
   const DEFAULT_NUDGE = 'Type your next move here.';
   const REVIEW_PROMPT = 'Give me a more detailed but easy-to-digest summary of this email. Highlight the main points, asks, deadlines, and any decisions in quick bullets.';
+  const REVISIT_PROMPTS = [
+    'Back on this thread. Want a recap or a next step?',
+    'We’ve seen this one before. Want the latest context?',
+    'Circling back here. Want me to summarize or suggest a reply?',
+    'Picking this back up. Need a quick refresher?',
+    'Returning to this thread. What’s the next move?'
+  ];
   window.SECRETARY_BOOTSTRAP = undefined;
   const debugEnabled = true;
   const logDebug = (...args) => {
@@ -75,7 +82,8 @@
     pendingArchiveThreadId: '',
     hydrated: new Set(),
     hydrating: new Set(),
-    pendingSuggestedActions: new Map()
+    pendingSuggestedActions: new Map(),
+    seenThreads: new Set()
   };
   const assistantQueues = new Map();
   const pendingTranscripts = new Map();
@@ -567,6 +575,8 @@
 
   function setActiveThread(threadId) {
     if (!threadId || !state.lookup.has(threadId)) return;
+    if (state.activeId === threadId) return;
+    const wasSeen = state.seenThreads.has(threadId);
     clearAutoAdvance();
     state.activeId = threadId;
     const thread = state.lookup.get(threadId);
@@ -588,6 +598,7 @@
 
     refs.emailEmpty.classList.add('hidden');
     updateEmailCard(thread);
+    insertThreadDivider(threadId);
     hydrateThreadTimeline(threadId);
     revealPendingTranscripts(threadId);
     ensureHistory(threadId);
@@ -599,6 +610,11 @@
     toggleComposer(true);
     refs.chatInput.value = '';
     nudgeComposer(DEFAULT_NUDGE, { focus: true });
+    if (wasSeen) {
+      const prompt = REVISIT_PROMPTS[Math.floor(Math.random() * REVISIT_PROMPTS.length)];
+      enqueueAssistantMessage(threadId, prompt);
+    }
+    state.seenThreads.add(threadId);
   }
 
   function updateEmailCard(thread) {
@@ -1185,13 +1201,11 @@
   function hydrateThreadTimeline(threadId) {
     if (!threadId) return;
     const hasTimelineEntries = state.timeline.some(item => item.threadId === threadId && item.type === 'transcript');
-    const hasDivider = state.timeline.some(item => item.threadId === threadId && item.type === 'divider');
     const serverItems = state.serverTimelines.get(threadId) || [];
     const alreadyHydrated = state.hydrated.has(threadId);
     const isHydrating = state.hydrating.has(threadId);
     logDebug('hydrateThreadTimeline', threadId, {
       hasTimelineEntries,
-      hasDivider,
       serverCount: serverItems.length,
       alreadyHydrated,
       isHydrating
@@ -1201,7 +1215,6 @@
     }
     const thread = state.lookup.get(threadId);
     if (!thread) return;
-    if (!hasDivider) insertThreadDivider(threadId);
     if (serverItems.length) {
       mergeServerTimeline(threadId, serverItems);
       state.hydrated.add(threadId);
@@ -1282,8 +1295,6 @@
   function insertThreadDivider(threadId) {
     const thread = state.lookup.get(threadId);
     if (!thread) return;
-    const alreadyInserted = state.timeline.some(item => item.type === 'divider' && item.threadId === threadId);
-    if (alreadyInserted) return;
     const sender = thread.from ? thread.from.split('<')[0].trim() || thread.from : '';
     const subject = (thread.subject || '').trim() || '(no subject)';
     const labelParts = [];
