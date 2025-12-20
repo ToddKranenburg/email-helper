@@ -21,18 +21,10 @@
     progress: document.getElementById('triage-progress'),
     progressTrack: document.querySelector('.triage-progress'),
     queuePill: document.getElementById('queue-pill-text'),
-    emailCard: document.getElementById('email-card'),
     emailEmpty: document.getElementById('email-empty'),
     loadMoreEmpty: document.getElementById('load-more-empty'),
     emailEmptyText: document.querySelector('#email-empty p'),
-    avatar: document.getElementById('email-avatar'),
-    sender: document.getElementById('email-sender'),
-    received: document.getElementById('email-received'),
     subject: document.getElementById('email-subject'),
-    position: document.getElementById('email-position'),
-    cta: document.getElementById('email-cta'),
-    preview: document.getElementById('email-preview'),
-    previewToggle: document.getElementById('preview-toggle'),
     chatLog: document.getElementById('assistant-chat-log'),
     chatScroll: document.getElementById('assistant-chat'),
     chatForm: document.getElementById('assistant-form'),
@@ -41,8 +33,8 @@
     chatHint: document.getElementById('assistant-hint'),
     reviewBtn: document.getElementById('action-review'),
     archiveBtn: document.getElementById('action-archive'),
-    moreBtn: document.getElementById('action-more'),
-    moreMenu: document.getElementById('more-menu'),
+    taskBtn: document.getElementById('action-task'),
+    skipBtn: document.getElementById('action-skip'),
     taskPanel: document.getElementById('task-panel'),
     taskPanelHelper: document.getElementById('task-panel-helper'),
     taskTitle: document.getElementById('task-title'),
@@ -55,15 +47,10 @@
     taskSubmit: document.getElementById('task-submit'),
     taskReset: document.getElementById('task-reset'),
     taskClose: document.getElementById('task-close'),
-    mapToggle: document.getElementById('map-toggle'),
-    drawer: document.getElementById('inbox-drawer'),
-    drawerClose: document.getElementById('drawer-close'),
-    needsList: document.getElementById('needs-list'),
-    needsCount: document.getElementById('needs-count'),
     reviewList: document.getElementById('review-list')
   };
 
-  if (!refs.chatLog || !refs.chatForm || !refs.emailCard || !refs.emailEmpty) {
+  if (!refs.chatLog || !refs.chatForm || !refs.emailEmpty) {
     return;
   }
 
@@ -90,6 +77,9 @@
     hydrating: new Set(),
     pendingSuggestedActions: new Map()
   };
+  const assistantQueues = new Map();
+  const pendingTranscripts = new Map();
+  let typingSessions = 0;
   const taskState = {
     open: false,
     status: 'idle', // idle | submitting | success | error
@@ -139,17 +129,6 @@
     updateLoadMoreButtons();
     wireEvents();
 
-    if (refs.previewToggle && refs.preview) {
-      refs.previewToggle.addEventListener('click', () => {
-        if (refs.previewToggle.disabled) return;
-        const isHidden = refs.preview.classList.toggle('hidden');
-        refs.previewToggle.textContent = isHidden ? 'See email body' : 'Hide email body';
-        if (!isHidden) {
-          refs.preview.scrollTop = 0;
-        }
-      });
-    }
-
     if (state.needs.length) {
       setActiveThread(state.needs[0]);
     } else {
@@ -170,11 +149,13 @@
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
     }
-    if (refs.moreBtn) {
-      refs.moreBtn.addEventListener('click', toggleMoreMenu);
+    if (refs.taskBtn) {
+      refs.taskBtn.addEventListener('click', () => {
+        if (state.activeId) requestDraft(state.activeId, 'generate');
+      });
     }
-    if (refs.moreMenu) {
-      refs.moreMenu.addEventListener('click', handleMoreMenuClick);
+    if (refs.skipBtn) {
+      refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
     }
 
     if (refs.loadMoreHead) {
@@ -190,31 +171,11 @@
       });
     }
 
-    if (refs.mapToggle && refs.drawer) {
-      refs.mapToggle.addEventListener('click', () => toggleDrawer(true));
-      refs.drawer.addEventListener('click', (event) => {
-        if (event.target === refs.drawer) toggleDrawer(false);
-      });
-      if (refs.drawerClose) {
-        refs.drawerClose.addEventListener('click', () => toggleDrawer(false));
-      }
-      document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && !refs.drawer.classList.contains('hidden')) {
-          toggleDrawer(false);
-        }
-      });
-      if (refs.needsList) refs.needsList.addEventListener('click', (event) => handleThreadListClick(event, 'drawer'));
-    }
     if (refs.reviewList) refs.reviewList.addEventListener('click', (event) => handleThreadListClick(event, 'queue'));
 
     document.addEventListener('click', (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (refs.moreMenu && !refs.moreMenu.classList.contains('hidden')) {
-        const inMenu = target.closest('#more-menu');
-        const toggle = target.closest('#action-more');
-        if (!inMenu && !toggle) hideMoreMenu();
-      }
       const btn = target.closest('button');
       if (!btn) return;
       if (btn.closest('#assistant-form')) return;
@@ -311,7 +272,8 @@
       const pendingSuggested = getPendingSuggestedAction(state.activeId);
       if (pendingSuggested) {
         event.preventDefault();
-        void handleSuggestedActionClick(state.activeId, pendingSuggested);
+        refs.chatInput.value = 'yes';
+        refs.chatForm.requestSubmit();
         return;
       }
     }
@@ -339,7 +301,7 @@
     renderChat();
     refs.chatInput.value = '';
     toggleComposer(false, { preserveTaskPanel: pendingCreate || taskState.open });
-    setAssistantTyping(true);
+    startAssistantTyping(state.activeId);
     const submitBtn = refs.chatForm.querySelector('button[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
 
@@ -355,7 +317,7 @@
 
       const handledSuggested = await handleSuggestedActionResponse(question);
       if (handledSuggested) {
-        setAssistantTyping(false);
+        stopAssistantTyping(state.activeId);
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         return;
@@ -363,21 +325,21 @@
 
       const intent = await detectIntent(question);
       if (intent === 'skip') {
-        setAssistantTyping(false);
+        stopAssistantTyping(state.activeId);
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         handleAutoIntent(intent, question, { alreadyLogged: true });
         return;
       }
       if (intent === 'archive') {
-        setAssistantTyping(false);
+        stopAssistantTyping(state.activeId);
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         await handleArchiveIntent(question, { alreadyLogged: true });
         return;
       }
       if (intent === 'create_task') {
-        setAssistantTyping(false);
+        stopAssistantTyping(state.activeId);
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         handleCreateTaskIntent();
@@ -402,15 +364,14 @@
         refs.chatInput.value = question;
         return;
       }
-      appendTurn(state.activeId, { role: 'assistant', content: data.reply || 'No response received.' });
-      renderChat();
+      await enqueueAssistantMessage(state.activeId, data.reply || 'No response received.');
     } catch (err) {
       popLastTurn(state.activeId);
       renderChat();
       setChatError('Unable to reach the assistant. Check your connection.');
       refs.chatInput.value = question;
     } finally {
-      setAssistantTyping(false);
+      stopAssistantTyping(state.activeId);
       toggleComposer(true);
       const submitBtn2 = refs.chatForm.querySelector('button[type="submit"]');
       if (submitBtn2) submitBtn2.disabled = false;
@@ -508,12 +469,15 @@
         syncTimelineFromServer(threadId, data.timeline);
       }
       if (actionType === 'archive') {
+        await waitForAssistantSettled(threadId);
         removeCurrentFromQueue();
       } else if (actionType === 'skip') {
+        await waitForAssistantSettled(threadId);
         skipCurrent('action');
       } else if (actionType === 'create_task') {
         clearPendingCreate();
         if (data?.status === 'created') {
+          await waitForAssistantSettled(threadId);
           advanceToNextThread(threadId);
         }
       }
@@ -612,7 +576,6 @@
       hydrated: state.hydrated.has(threadId)
     });
     if (!thread) return;
-    hideMoreMenu();
     if (taskState.open && taskState.lastSourceId !== threadId) {
       closeTaskPanel(true);
     }
@@ -623,15 +586,10 @@
       clearPendingArchive();
     }
 
-    refs.emailCard.classList.remove('hidden');
     refs.emailEmpty.classList.add('hidden');
-    if (refs.mapToggle) {
-      refs.mapToggle.disabled = false;
-      refs.mapToggle.removeAttribute('aria-disabled');
-    }
-
     updateEmailCard(thread);
     hydrateThreadTimeline(threadId);
+    revealPendingTranscripts(threadId);
     ensureHistory(threadId);
     setChatError('');
     renderChat(threadId);
@@ -649,34 +607,8 @@
       refs.position.textContent = label || '';
       refs.position.classList.toggle('hidden', !label);
     }
-    if (refs.avatar) refs.avatar.textContent = initialsFromSender(thread.from);
-    if (refs.sender) refs.sender.textContent = thread.from || 'Unknown sender';
-    if (refs.received) refs.received.textContent = formatTimestamp(thread.receivedAt);
-    if (refs.subject) refs.subject.textContent = thread.subject || '(no subject)';
-    if (refs.cta) {
-      if (thread.link) {
-        refs.cta.href = thread.link;
-        refs.cta.classList.remove('hidden');
-      } else {
-        refs.cta.classList.add('hidden');
-        refs.cta.removeAttribute('href');
-      }
-    }
-    if (refs.preview && refs.previewToggle) {
-      const previewText = (thread.convo || '').trim();
-      if (previewText) {
-        refs.preview.innerHTML = renderPlainText(previewText, { preserveLineBreaks: true });
-        refs.preview.classList.add('hidden');
-        refs.previewToggle.disabled = false;
-        refs.previewToggle.textContent = 'See email body';
-      } else {
-        const fallbackCopy = 'Email body is unavailable for this message.';
-        refs.preview.innerHTML = renderPlainText(fallbackCopy);
-        refs.preview.classList.remove('hidden');
-        refs.previewToggle.disabled = true;
-        refs.previewToggle.textContent = 'Email body unavailable';
-      }
-    }
+    const subjectCopy = thread.subject || '(no subject)';
+    if (refs.subject) refs.subject.textContent = subjectCopy;
   }
 
   function refreshTaskSuggestion(thread) {
@@ -1034,41 +966,6 @@
     }
   }
 
-  function toggleMoreMenu(event) {
-    if (event) event.preventDefault();
-    if (!refs.moreMenu || !refs.moreBtn || !state.activeId) return;
-    const isOpen = !refs.moreMenu.classList.contains('hidden');
-    if (isOpen) {
-      hideMoreMenu();
-      return;
-    }
-    refs.moreMenu.classList.remove('hidden');
-    refs.moreBtn.setAttribute('aria-expanded', 'true');
-  }
-
-  function hideMoreMenu() {
-    if (!refs.moreMenu || !refs.moreBtn) return;
-    refs.moreMenu.classList.add('hidden');
-    refs.moreBtn.setAttribute('aria-expanded', 'false');
-  }
-
-  function handleMoreMenuClick(event) {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const action = target.closest('button')?.dataset?.action;
-    if (!action) return;
-    event.preventDefault();
-    hideMoreMenu();
-    if (action === 'task') {
-      if (state.activeId) {
-        requestDraft(state.activeId, 'generate');
-      }
-    }
-    if (action === 'skip') {
-      skipCurrent('menu');
-    }
-  }
-
   function getLoadedCount() {
     return state.totalLoaded || state.positions.size || 0;
   }
@@ -1096,9 +993,7 @@
   }
 
   function updateDrawerLists() {
-    renderThreadList(refs.needsList, 'drawer');
     renderThreadList(refs.reviewList, 'queue');
-    if (refs.needsCount) refs.needsCount.textContent = state.hasMore ? `${state.needs.length}+` : String(state.needs.length);
   }
 
   function renderThreadList(listEl, variant = 'drawer') {
@@ -1325,6 +1220,7 @@
       const bTime = new Date(b.createdAt || '').getTime();
       return aTime - bTime;
     });
+    const shouldDefer = true;
     ordered.forEach(msg => {
       const id = typeof msg?.id === 'string' ? msg.id : '';
       if (id && state.timelineMessageIds.has(id)) return;
@@ -1332,13 +1228,6 @@
       const resolvedType = typeof msg.messageType === 'string' && msg.messageType
         ? msg.messageType
         : (typeof msg.type === 'string' ? msg.type : '');
-      if (resolvedType === 'suggested_action') {
-        const suggested = normalizeSuggestedAction(msg?.payload?.actionType);
-        if (suggested) setPendingSuggestedAction(threadId, suggested);
-      }
-      if (resolvedType === 'draft_details') {
-        setPendingCreate(threadId);
-      }
       const entry = {
         type: 'transcript',
         id,
@@ -1348,7 +1237,12 @@
         payload: msg.payload || {},
         createdAt: msg.createdAt || ''
       };
-      state.timeline.push(entry);
+      if (shouldDefer) {
+        storePendingTranscript(threadId, entry);
+      } else {
+        applyTranscriptEntryEffects(threadId, entry);
+        state.timeline.push(entry);
+      }
     });
     logDebug('mergeServerTimeline', {
       threadId,
@@ -1357,6 +1251,9 @@
       ids: ordered.map(m => m.id || '(no id)'),
       messageTypes: ordered.map(m => m.type)
     });
+    if (threadId === state.activeId) {
+      revealPendingTranscripts(threadId);
+    }
   }
 
   function appendTurn(threadId, turn) {
@@ -1573,10 +1470,10 @@
     refs.chatInput.disabled = !enabled || !state.activeId;
     if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
-    if (refs.moreBtn) refs.moreBtn.disabled = !enabled || !state.activeId;
+    if (refs.taskBtn) refs.taskBtn.disabled = !enabled || !state.activeId;
+    if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
     if (!enabled) {
       clearComposerNudge();
-      hideMoreMenu();
       if (!preserveTaskPanel) {
         closeTaskPanel(true);
       }
@@ -1632,6 +1529,112 @@
     renderChat(state.activeId);
   }
 
+  function startAssistantTyping(threadId = state.activeId) {
+    if (threadId !== state.activeId) return;
+    typingSessions += 1;
+    if (typingSessions === 1) setAssistantTyping(true);
+  }
+
+  function stopAssistantTyping(threadId = state.activeId) {
+    if (threadId !== state.activeId) return;
+    typingSessions = Math.max(0, typingSessions - 1);
+    if (typingSessions === 0) setAssistantTyping(false);
+  }
+
+  function nextTypingDelay(message) {
+    const base = 220;
+    const extra = Math.min(420, Math.max(0, Math.floor((message || '').length * 6)));
+    return base + extra;
+  }
+
+  function enqueueAssistantMessage(threadId, content, options = {}) {
+    if (!threadId) return Promise.resolve();
+    const delay = options.instant ? 0 : nextTypingDelay(content);
+    const queue = assistantQueues.get(threadId) || Promise.resolve();
+    const next = queue.then(async () => {
+      const isActive = threadId === state.activeId;
+      if (delay > 0 && isActive) startAssistantTyping(threadId);
+      if (delay > 0) await new Promise(resolve => window.setTimeout(resolve, delay));
+      appendTurn(threadId, { role: 'assistant', content });
+      renderChat(threadId);
+      if (delay > 0 && isActive) stopAssistantTyping(threadId);
+    }).catch((err) => {
+      console.error('Failed to enqueue assistant message', err);
+      stopAssistantTyping(threadId);
+    });
+    assistantQueues.set(threadId, next);
+    return next;
+  }
+
+  async function waitForAssistantQueue(threadId) {
+    const queue = assistantQueues.get(threadId);
+    if (!queue) return;
+    try {
+      await queue;
+    } catch (err) {
+      console.error('Failed while waiting for assistant queue', err);
+    }
+  }
+
+  async function waitForAssistantSettled(threadId) {
+    if (!threadId) return;
+    revealPendingTranscripts(threadId);
+    let current = assistantQueues.get(threadId);
+    while (current) {
+      try {
+        await current;
+      } catch (err) {
+        console.error('Failed while waiting for assistant to settle', err);
+      }
+      const next = assistantQueues.get(threadId);
+      if (next === current) break;
+      current = next;
+    }
+  }
+
+  function applyTranscriptEntryEffects(threadId, entry) {
+    if (entry.messageType === 'suggested_action') {
+      const suggested = normalizeSuggestedAction(entry?.payload?.actionType);
+      if (suggested) setPendingSuggestedAction(threadId, suggested);
+    }
+    if (entry.messageType === 'draft_details') {
+      setPendingCreate(threadId);
+    }
+  }
+
+  function enqueueTranscriptEntry(threadId, entry) {
+    if (!threadId) return Promise.resolve();
+    const delay = nextTypingDelay(entry.content || '');
+    const queue = assistantQueues.get(threadId) || Promise.resolve();
+    const next = queue.then(async () => {
+      const isActive = threadId === state.activeId;
+      if (delay > 0 && isActive) startAssistantTyping(threadId);
+      if (delay > 0) await new Promise(resolve => window.setTimeout(resolve, delay));
+      applyTranscriptEntryEffects(threadId, entry);
+      state.timeline.push(entry);
+      renderChat(threadId);
+      if (delay > 0 && isActive) stopAssistantTyping(threadId);
+    }).catch((err) => {
+      console.error('Failed to enqueue transcript entry', err);
+      stopAssistantTyping(threadId);
+    });
+    assistantQueues.set(threadId, next);
+    return next;
+  }
+
+  function storePendingTranscript(threadId, entry) {
+    const pending = pendingTranscripts.get(threadId) || [];
+    pending.push(entry);
+    pendingTranscripts.set(threadId, pending);
+  }
+
+  function revealPendingTranscripts(threadId) {
+    const pending = pendingTranscripts.get(threadId);
+    if (!pending || !pending.length) return;
+    pendingTranscripts.delete(threadId);
+    pending.reduce((chain, entry) => chain.then(() => enqueueTranscriptEntry(threadId, entry)), Promise.resolve());
+  }
+
   function withButtonBusy(btn, label) {
     const original = btn.textContent;
     btn.disabled = true;
@@ -1655,7 +1658,7 @@
     appendTurn(threadId, { role: 'user', content: REVIEW_PROMPT });
     renderChat();
     toggleComposer(false);
-    setAssistantTyping(true);
+    startAssistantTyping(threadId);
     const restore = withButtonBusy(refs.reviewBtn, 'Getting details…');
 
     try {
@@ -1675,8 +1678,7 @@
         throw new Error(data?.error || 'Unable to review this email.');
       }
       const reply = typeof data?.review === 'string' ? data.review.trim() : '';
-      appendTurn(threadId, { role: 'assistant', content: reply || 'Here’s what I could pull together.' });
-      renderChat();
+      await enqueueAssistantMessage(threadId, reply || 'Here’s what I could pull together.');
       updateHint(threadId);
     } catch (err) {
       console.error('Review request failed', err);
@@ -1684,7 +1686,7 @@
       setChatError(message);
     } finally {
       restore();
-      setAssistantTyping(false);
+      stopAssistantTyping(threadId);
       toggleComposer(Boolean(state.activeId));
       nudgeComposer(DEFAULT_NUDGE, { focus: true });
     }
@@ -1707,6 +1709,7 @@
       if (!resp.ok) {
         throw new Error(data?.error || 'Unable to archive this email.');
       }
+      await waitForAssistantSettled(threadId);
       removeCurrentFromQueue();
     } catch (err) {
       console.error('Failed to archive thread', err);
@@ -1730,7 +1733,6 @@
     updateHeaderCount();
     updateQueuePill();
     closeTaskPanel(true);
-    hideMoreMenu();
     clearPendingSuggestedAction(threadId);
 
     if (!state.needs.length) {
@@ -1767,7 +1769,6 @@
     updateHeaderCount();
     updateQueuePill();
     closeTaskPanel(true);
-    hideMoreMenu();
     clearPendingSuggestedAction(threadId);
     if (!hasRoomToAdvance) return;
     const nextIndex = index === -1 ? 0 : (index + 1) % state.needs.length;
@@ -1784,17 +1785,18 @@
       renderChat();
     }
 
-    appendTurn(state.activeId, { role: 'assistant', content: 'Skipping for now. It stays in Needs Review.' });
-    renderChat();
+    const skipPromise = enqueueAssistantMessage(state.activeId, 'Skipping for now. It stays in Needs Review.');
     updateHint(state.activeId);
 
     clearAutoAdvance();
     const targetId = state.activeId;
-    state.autoAdvanceTimer = window.setTimeout(() => {
+    skipPromise.then(async () => {
+      if (state.activeId !== targetId) return;
+      await waitForAssistantSettled(targetId);
       if (state.activeId !== targetId) return;
       skipCurrent('auto');
       clearAutoAdvance();
-    }, 600);
+    });
   }
 
   function clearAutoAdvance() {
@@ -1813,15 +1815,14 @@
       renderChat();
     }
 
-    appendTurn(state.activeId, { role: 'assistant', content: 'Archiving this email in Gmail…' });
-    renderChat();
+    enqueueAssistantMessage(state.activeId, 'Archiving this email in Gmail…');
     updateHint(state.activeId);
 
-    setAssistantTyping(true);
+    startAssistantTyping(state.activeId);
     try {
       await archiveCurrent('auto-intent');
     } finally {
-      setAssistantTyping(false);
+      stopAssistantTyping(state.activeId);
     }
   }
 
@@ -1865,8 +1866,7 @@
 
     if (isNegativeResponse(normalized)) {
       clearPendingSuggestedAction(state.activeId);
-      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, I’ll hold off. Tell me what you’d like me to do instead.' });
-      renderChat();
+      enqueueAssistantMessage(state.activeId, 'Okay, I’ll hold off. Tell me what you’d like me to do instead.');
       return true;
     }
 
@@ -1905,21 +1905,19 @@
       }
       const result = await submitTask();
       if (result?.ok) {
-        appendTurn(state.activeId, { role: 'assistant', content: buildTaskCreatedMessage(result) });
+        enqueueAssistantMessage(state.activeId, buildTaskCreatedMessage(result));
         clearPendingCreate();
         promptArchiveAfterTask(result, { includeSuccess: false });
       } else if (result?.error) {
-        appendTurn(state.activeId, { role: 'assistant', content: `Couldn't create the task: ${result.error}` });
+        enqueueAssistantMessage(state.activeId, `Couldn't create the task: ${result.error}`);
       }
-      renderChat();
       return;
     }
 
     if (isNegativeResponse(normalized)) {
       clearPendingCreate();
       renderTaskPanel();
-      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, I won’t create it. Adjust the fields or ask another action.' });
-      renderChat();
+      enqueueAssistantMessage(state.activeId, 'Okay, I won’t create it. Adjust the fields or ask another action.');
       return;
     }
 
@@ -1937,8 +1935,7 @@
       return;
     }
 
-    appendTurn(state.activeId, { role: 'assistant', content: 'Please confirm: create the task as shown? (yes/no)' });
-    renderChat();
+    enqueueAssistantMessage(state.activeId, 'Please confirm: create the task as shown? (yes/no)');
   }
 
   function buildTaskConfirmationPrompt() {
@@ -1983,11 +1980,10 @@
     const includeSuccess = Boolean(options.includeSuccess);
     setPendingArchive(threadId);
     if (includeSuccess) {
-      appendTurn(threadId, { role: 'assistant', content: buildTaskCreatedMessage(result) });
+      enqueueAssistantMessage(threadId, buildTaskCreatedMessage(result));
     }
     const prompt = 'Archive this email and move on? I can keep it here if you want.';
-    appendTurn(threadId, { role: 'assistant', content: prompt });
-    renderChat();
+    enqueueAssistantMessage(threadId, prompt);
     updateHint(threadId);
   }
 
@@ -2015,13 +2011,11 @@
 
     if (isNegativeResponse(normalized)) {
       clearPendingArchive();
-      appendTurn(state.activeId, { role: 'assistant', content: 'Okay, leaving it in Needs Review. Ask to archive anytime.' });
-      renderChat();
+      enqueueAssistantMessage(state.activeId, 'Okay, leaving it in Needs Review. Ask to archive anytime.');
       return;
     }
 
-    appendTurn(state.activeId, { role: 'assistant', content: 'Want me to archive this email or keep it here?' });
-    renderChat();
+    enqueueAssistantMessage(state.activeId, 'Want me to archive this email or keep it here?');
   }
 
   function setEmptyState(message) {
@@ -2030,9 +2024,7 @@
       : 'All emails reviewed. Nice work.';
     const copy = message || fallback;
     closeTaskPanel(true);
-    hideMoreMenu();
     state.activeId = '';
-    refs.emailCard.classList.add('hidden');
     refs.emailEmpty.classList.remove('hidden');
     if (refs.position) {
       refs.position.textContent = '';
@@ -2041,10 +2033,6 @@
     if (refs.emailEmptyText) refs.emailEmptyText.textContent = copy;
     if (refs.loadMoreEmpty) {
       refs.loadMoreEmpty.classList.toggle('hidden', !state.hasMore);
-    }
-    if (refs.mapToggle) {
-      refs.mapToggle.setAttribute('aria-disabled', 'true');
-      refs.mapToggle.disabled = true;
     }
     renderChat();
     updateQueuePill();
