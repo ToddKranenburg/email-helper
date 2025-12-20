@@ -294,6 +294,27 @@
     if (event.key !== 'Enter') return;
     if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
     if (refs.chatInput.disabled) return;
+    const trimmed = refs.chatInput.value.trim();
+    if (!trimmed) {
+      if (isCreateConfirmationPending(state.activeId)) {
+        event.preventDefault();
+        refs.chatInput.value = 'yes';
+        refs.chatForm.requestSubmit();
+        return;
+      }
+      if (isArchiveConfirmationPending(state.activeId)) {
+        event.preventDefault();
+        refs.chatInput.value = 'yes';
+        refs.chatForm.requestSubmit();
+        return;
+      }
+      const pendingSuggested = getPendingSuggestedAction(state.activeId);
+      if (pendingSuggested) {
+        event.preventDefault();
+        void handleSuggestedActionClick(state.activeId, pendingSuggested);
+        return;
+      }
+    }
     event.preventDefault();
     refs.chatForm.requestSubmit();
   }
