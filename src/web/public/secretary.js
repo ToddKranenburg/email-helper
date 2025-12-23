@@ -61,6 +61,9 @@
     return;
   }
 
+  const DEFAULT_PLACEHOLDER = refs.chatInput?.placeholder || 'Type a message…';
+  const SUGGESTED_PLACEHOLDER = 'Press Enter to accept • or type to respond…';
+
   const state = {
     lookup: new Map(),
     positions: new Map(),
@@ -1187,6 +1190,14 @@
       : 'Chat limit reached here.';
   }
 
+  function updateComposerPlaceholder(threadId = state.activeId) {
+    if (!refs.chatInput) return;
+    const isActive = threadId && threadId === state.activeId;
+    const hasSuggested = isActive
+      && (Boolean(getPendingSuggestedAction(threadId)) || isCreateConfirmationPending(threadId));
+    refs.chatInput.placeholder = hasSuggested ? SUGGESTED_PLACEHOLDER : DEFAULT_PLACEHOLDER;
+  }
+
   function ensureHistory(threadId) {
     if (!state.histories.has(threadId)) {
       state.histories.set(threadId, []);
@@ -1336,6 +1347,7 @@
     }
     refs.chatLog.innerHTML = markup;
     if (refs.chatScroll) refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+    updateComposerPlaceholder(threadId);
   }
 
   function renderTimelineEntry(entry) {
@@ -1395,7 +1407,7 @@
           <p class="chat-badge">Suggested action</p>
           <p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>
           <div class="suggested-actions">
-            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(actionType)}" ${disabled ? 'disabled' : ''}>${label}</button>
+            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(actionType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
           </div>
         </div>
       </div>`;
@@ -1410,7 +1422,7 @@
           <p><strong>Notes:</strong> ${htmlEscape(draft.notes || 'None')}</p>
           <p><strong>Due:</strong> ${htmlEscape(due)}</p>
           <div class="suggested-actions">
-            <button type="button" data-action="draft-create" data-thread-id="${escapeAttribute(entry.threadId)}">Create task</button>
+            <button type="button" class="enter-hint-btn" data-action="draft-create" data-thread-id="${escapeAttribute(entry.threadId)}">Create task<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
             <button type="button" data-action="draft-edit" data-thread-id="${escapeAttribute(entry.threadId)}">Edit</button>
           </div>
         </div>
@@ -1496,11 +1508,13 @@
     if (!threadId || !normalized) return;
     state.pendingSuggestedActions.set(threadId, normalized);
     logDebug('setPendingSuggestedAction', { threadId, actionType: normalized });
+    updateComposerPlaceholder(threadId);
   }
   function clearPendingSuggestedAction(threadId = state.activeId) {
     if (!threadId) return;
     state.pendingSuggestedActions.delete(threadId);
     logDebug('clearPendingSuggestedAction', { threadId });
+    updateComposerPlaceholder(threadId);
   }
   function getPendingSuggestedAction(threadId = state.activeId) {
     if (!threadId) return '';
@@ -1510,12 +1524,14 @@
   function setPendingCreate(threadId) {
     state.pendingCreateThreadId = threadId || '';
     renderTaskPanel();
+    updateComposerPlaceholder(threadId);
   }
 
   function clearPendingCreate() {
     if (!state.pendingCreateThreadId) return;
     state.pendingCreateThreadId = '';
     renderTaskPanel();
+    updateComposerPlaceholder();
   }
 
   function isCreateConfirmationPending(threadId = state.activeId) {

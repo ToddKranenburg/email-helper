@@ -663,10 +663,32 @@
       border: none;
       background: var(--text);
       color: #fff;
-      padding: 10px 14px;
+      padding: 10px 30px 10px 14px;
       border-radius: 12px;
       font-weight: 700;
       cursor: pointer;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .suggested-enter-hint {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      opacity: 0.8;
+      pointer-events: none;
+    }
+    .enter-hint-btn {
+      position: relative;
+      padding-right: 30px;
+      display: inline-flex;
+      align-items: center;
     }
     .suggested-btn:disabled {
       opacity: 0.5;
