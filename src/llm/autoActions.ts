@@ -1,9 +1,10 @@
 import OpenAI from 'openai';
-import { type ActionType } from '../actions/persistence.js';
+import { type ActionType, type ExternalActionPayload } from '../actions/persistence.js';
 
 export type SuggestedActionPayload = {
   actionType: ActionType;
   userFacingPrompt: string;
+  externalAction?: ExternalActionPayload | null;
 };
 
 export type AutoSummaryResult = {
@@ -23,10 +24,17 @@ const openai = process.env.OPENAI_API_KEY
 
 const AUTO_SUMMARY_PROMPT = `You summarize email threads for a busy professional and propose ONE next action.
 Output STRICT JSON:
-{"must_know":"<plain text essentials only>","suggested_action":{"actionType":"archive|create_task|more_info|skip","userFacingPrompt":"<concise action prompt>"}}
+{"must_know":"<plain text essentials only>","action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|EXTERNAL_ACTION|NONE","suggested_action":{"userFacingPrompt":"<concise action prompt>"},"external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}
 Rules:
 - "must_know": concise, essential content only (no actions, no emojis, no markdown).
-- "suggested_action": exactly one of archive | create_task | more_info | skip. Keep "userFacingPrompt" short, direct, and grounded in the thread. No markdown, no quotes, no emojis.`;
+- "action_type": choose ONE. Prefer ARCHIVE when no action is needed. Use NONE only for truly ignorable content.
+- "suggested_action.userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
+- "external_action": only include when action_type is EXTERNAL_ACTION.
+- EXTERNAL_ACTION is for meaningful user actions outside the app (security alerts, verification, compliance, account lock risk, past-due notices, required RSVP/forms). Marketing/promotional CTAs like “buy now”, “upgrade”, “shop” must NOT trigger EXTERNAL_ACTION.
+- CREATE_TASK is only for reminders when the email cannot be resolved immediately and the user should handle it later (future follow-ups, deadlines, planned check-ins). If there is a direct link to take action now (review budget, verify account, RSVP, submit form), prefer EXTERNAL_ACTION.
+- "external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
+- "external_action.links": 1-3 items. Prefer explicit account/security/action URLs from the email. Avoid generic homepage links.
+- If action_type is NONE, omit suggested_action and external_action.`;
 
 const TASK_DRAFT_PROMPT = `You draft Google Tasks from an email thread.
 Output STRICT JSON: {"title":"...","notes":"...","dueDate":"YYYY-MM-DD or null"}
@@ -123,12 +131,29 @@ function parseAutoSummary(payload: string): AutoSummaryResult | null {
   const safe = extractJson(payload);
   if (!safe) return null;
   const mustKnow = normalizeText(safe.must_know || safe.mustKnow || safe.mustknow);
-  const actionType = normalizeActionType(safe?.suggested_action?.actionType || safe?.suggested_action?.action_type);
-  const prompt = normalizeText(safe?.suggested_action?.userFacingPrompt || safe?.suggested_action?.prompt);
+  const actionType = normalizeActionType(
+    safe?.action_type ||
+      safe?.actionType ||
+      safe?.suggested_action?.actionType ||
+      safe?.suggested_action?.action_type
+  );
+  const normalizedExternal = normalizeExternalAction(safe?.external_action || safe?.externalAction);
+  const externalAction = actionType === 'external_action' ? normalizedExternal : null;
+  let prompt = normalizeText(safe?.suggested_action?.userFacingPrompt || safe?.suggested_action?.prompt);
+  if (!prompt && actionType) {
+    if (actionType === 'external_action') {
+      prompt = normalizeText(externalAction?.steps);
+    } else {
+      prompt = actionPrompt(actionType);
+    }
+  }
+  if (actionType === 'archive' && prompt && !/\barchive\b/i.test(prompt)) {
+    prompt = actionPrompt('archive');
+  }
   if (!mustKnow || !actionType || !prompt) return null;
   return {
     mustKnow,
-    suggestedAction: { actionType, userFacingPrompt: prompt }
+    suggestedAction: { actionType, userFacingPrompt: prompt, externalAction }
   };
 }
 
@@ -184,7 +209,8 @@ function normalizeText(value: unknown) {
 
 function normalizeActionType(value: unknown): ActionType | null {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip') {
+  if (text === 'none') return 'archive';
+  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip' || text === 'external_action') {
     return text as ActionType;
   }
   return null;
@@ -216,5 +242,42 @@ function actionPrompt(action: ActionType) {
   if (action === 'archive') return 'Archive this thread to keep your inbox clear?';
   if (action === 'create_task') return 'Draft a quick task so this stays on your radar?';
   if (action === 'more_info') return 'Want me to pull more context or clarifications?';
+  if (action === 'external_action') return 'This needs your attention outside the app. Want the key links?';
   return 'Skip for now and move to the next email?';
+}
+
+function normalizeExternalAction(raw: unknown): ExternalActionPayload | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as { steps?: unknown; links?: unknown };
+  const steps = normalizeText(candidate.steps);
+  const links = normalizeExternalLinks(candidate.links);
+  if (!steps) return null;
+  return { steps, links };
+}
+
+function normalizeExternalLinks(raw: unknown): ExternalActionPayload['links'] {
+  if (!Array.isArray(raw)) return [];
+  const links = raw.map(item => normalizeExternalLink(item)).filter(Boolean) as ExternalActionPayload['links'];
+  return links.slice(0, 3);
+}
+
+function normalizeExternalLink(raw: unknown) {
+  if (!raw || typeof raw !== 'object') return null;
+  const link = raw as { label?: unknown; url?: unknown };
+  const label = normalizeText(link.label);
+  const url = normalizeUrl(link.url);
+  if (!url) return null;
+  return { label: label || url, url };
+}
+
+function normalizeUrl(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  try {
+    const parsed = new URL(text);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+  } catch {
+    return '';
+  }
+  return '';
 }

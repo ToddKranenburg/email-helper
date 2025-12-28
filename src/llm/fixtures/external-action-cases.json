@@ -1,0 +1,38 @@
+[
+  {
+    "name": "marketing_promo_no_external_action",
+    "subject": "Flash Sale: 30% off this weekend",
+    "headline": "Shop now and save 30% on annual plans",
+    "summary": "Promo email encouraging an upgrade with a limited-time discount.",
+    "nextStep": "No action",
+    "participants": ["Acme Deals <deals@acme.com>"],
+    "transcript": "Upgrade now and save 30% on annual plans. Shop now: https://acme.com/pricing?utm_source=email"
+  },
+  {
+    "name": "security_alert_external_action",
+    "subject": "Google Account security alert",
+    "headline": "Suspicious sign-in blocked",
+    "summary": "Google blocked a suspicious sign-in and asks to review recent activity.",
+    "nextStep": "Review account activity",
+    "participants": ["Google Security <no-reply@accounts.google.com>"],
+    "transcript": "We blocked a sign-in attempt. If this was you, review your recent activity. Review activity: https://myaccount.google.com/security-checkup"
+  },
+  {
+    "name": "utility_past_due_external_action",
+    "subject": "Past-due notice for electric service",
+    "headline": "Payment required to avoid service interruption",
+    "summary": "Utility account is past due and requires payment to prevent shutoff.",
+    "nextStep": "Pay balance",
+    "participants": ["City Electric <billing@cityelectric.com>"],
+    "transcript": "Your account is past due. Please view your bill and submit payment to avoid interruption. View bill: https://cityelectric.com/billing/pay"
+  },
+  {
+    "name": "budget_review_external_action",
+    "subject": "You have 1 new update in Monarch",
+    "headline": "Flexible budget exceeded",
+    "summary": "Monarch reports your flexible budget is over by $1,776 and asks you to review details.",
+    "nextStep": "Review budget",
+    "participants": ["Monarch <no-reply@monarchmoney.com>"],
+    "transcript": "You have exceeded your Flexible budget by $1,776. Review the budget details in Monarch. Review budget: https://app.monarchmoney.com/budgets/flexible"
+  }
+]

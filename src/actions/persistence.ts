@@ -2,7 +2,7 @@ import { Prisma, type ActionFlow, type TranscriptMessage } from '@prisma/client'
 import { prisma } from '../store/db.js';
 import { AutoSummaryResult, generateAutoSummary, generateTaskDraft, TaskDraft } from '../llm/autoActions.js';
 
-export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip';
+export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action';
 export type ActionState = 'suggested' | 'draft_ready' | 'editing' | 'executing' | 'completed' | 'failed';
 export type TranscriptType =
   | 'must_know'
@@ -10,6 +10,16 @@ export type TranscriptType =
   | 'draft_details'
   | 'inline_editor'
   | 'action_result';
+
+export type ExternalActionLink = {
+  label: string;
+  url: string;
+};
+
+export type ExternalActionPayload = {
+  steps: string;
+  links: ExternalActionLink[];
+};
 
 export type TimelineMessage = {
   id: string;
@@ -62,7 +72,11 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext) {
   });
 
   const actionType: ActionType = generated.suggestedAction?.actionType || 'skip';
-  const prompt = generated.suggestedAction?.userFacingPrompt || 'Skip for now and move to the next email?';
+  const externalAction = generated.suggestedAction?.externalAction || null;
+  const prompt = generated.suggestedAction?.userFacingPrompt
+    || (actionType === 'external_action'
+      ? 'This needs your attention outside the app. Here are the key links.'
+      : 'Skip for now and move to the next email?');
   const mustKnow = generated.mustKnow || ctx.summary || ctx.headline || ctx.subject || 'New email.';
 
   const result = await prisma.$transaction(async tx => {
@@ -101,7 +115,7 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext) {
         threadId: ctx.threadId,
         type: 'suggested_action',
         content: prompt,
-        payload: packPayload({ actionType })
+        payload: packPayload({ actionType, externalAction })
       }
     });
 

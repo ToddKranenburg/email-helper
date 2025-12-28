@@ -1108,7 +1108,7 @@
   function normalizeActionFlow(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const allowedStates = new Set(['suggested', 'draft_ready', 'editing', 'executing', 'completed', 'failed']);
-    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip']);
+    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip', 'external_action']);
     const actionType = typeof raw.actionType === 'string' && allowedTypes.has(raw.actionType) ? raw.actionType : '';
     const state = typeof raw.state === 'string' && allowedStates.has(raw.state) ? raw.state : 'suggested';
     return actionType ? { ...raw, actionType, state } : null;
@@ -1139,6 +1139,14 @@
     return '';
   }
 
+  function normalizeActionType(value) {
+    const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'external_action') {
+      return val;
+    }
+    return '';
+  }
+
   function guessSuggestedAction(thread) {
     const next = normalizeSuggestedAction(actionFromNextStep(thread?.nextStep));
     if (next) return next;
@@ -1156,6 +1164,28 @@
     const notes = typeof draft.notes === 'string' ? draft.notes.trim() : '';
     const dueDate = typeof draft.dueDate === 'string' ? draft.dueDate.trim() : '';
     return { title, notes, dueDate };
+  }
+
+  function normalizeExternalActionPayload(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const payload = raw;
+    const steps = typeof payload.steps === 'string' ? payload.steps.trim() : '';
+    const links = Array.isArray(payload.links)
+      ? payload.links
+        .map(normalizeExternalLink)
+        .filter(Boolean)
+        .slice(0, 3)
+      : [];
+    if (!steps) return null;
+    return { steps, links };
+  }
+
+  function normalizeExternalLink(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const label = typeof raw.label === 'string' ? raw.label.trim() : '';
+    const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+    if (!url) return null;
+    return { label: label || url, url };
   }
 
   function suggestedActionLabel(actionType) {
@@ -1399,15 +1429,28 @@
       return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Must know</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
     }
     if (entry.messageType === 'suggested_action') {
-      const actionType = normalizeSuggestedAction(entry?.payload?.actionType) || '';
+      const actionType = normalizeActionType(entry?.payload?.actionType);
+      if (actionType === 'external_action') {
+        const externalAction = normalizeExternalActionPayload(entry?.payload?.externalAction || entry?.payload?.external_action);
+        const steps = externalAction?.steps || entry.content || '';
+        const linksMarkup = renderExternalLinks(externalAction?.links || []);
+        return `<div class="chat-message assistant">
+          <div class="chat-card suggested-card">
+            <p class="chat-badge">External action</p>
+            <p class="suggested-copy">${renderPlainText(steps, { preserveLineBreaks: true })}</p>
+            ${linksMarkup}
+          </div>
+        </div>`;
+      }
+      const agenticType = normalizeSuggestedAction(actionType) || '';
       const disabled = actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip';
-      const label = suggestedActionLabel(actionType);
+      const label = suggestedActionLabel(agenticType);
       return `<div class="chat-message assistant">
         <div class="chat-card suggested-card">
           <p class="chat-badge">Suggested action</p>
           <p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>
           <div class="suggested-actions">
-            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(actionType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
+            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(agenticType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
           </div>
         </div>
       </div>`;
@@ -1448,6 +1491,29 @@
       return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Result</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
     }
     return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">${htmlEscape(entry.messageType || 'Note')}</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+  }
+
+  function renderExternalLinks(links) {
+    if (!links || !links.length) return '';
+    const items = links.map(link => {
+      const label = htmlEscape(link.label || link.url || 'Open link');
+      const href = escapeAttribute(link.url || '');
+      const displayUrl = htmlEscape(formatLinkLabel(link.url || ''));
+      return `<li><a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a><span class="external-link-url">${displayUrl}</span></li>`;
+    }).join('');
+    return `<ul class="external-links">${items}</ul>`;
+  }
+
+  function formatLinkLabel(url) {
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      const host = parsed.host.replace(/^www\./, '');
+      const path = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/$/, '') : '';
+      return `${host}${path}`;
+    } catch {
+      return url;
+    }
   }
 
   function chatPlaceholder() {
