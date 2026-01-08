@@ -747,23 +747,24 @@ async function loadPage(userId: string, requestedPage: number, opts: { assumeMor
 async function loadPageWithOpts(userId: string, requestedPage: number, opts: { assumeMore?: boolean }) {
   const currentPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
   const skip = (currentPage - 1) * PAGE_SIZE;
-  const results = await prisma.summary.findMany({
-    where: { userId },
-    include: { Thread: true },
-    orderBy: [
-      { Thread: { lastMessageTs: 'desc' } },
-      { createdAt: 'desc' }
-    ],
-    skip,
-    take: PAGE_SIZE + 1 // fetch one extra to infer "has more" without full count
-  }) as SummaryWithThread[];
+  const [results, totalItems] = await Promise.all([
+    prisma.summary.findMany({
+      where: { userId },
+      include: { Thread: true },
+      orderBy: [
+        { Thread: { lastMessageTs: 'desc' } },
+        { createdAt: 'desc' }
+      ],
+      skip,
+      take: PAGE_SIZE + 1 // fetch one extra so we can keep rendering full pages
+    }) as Promise<SummaryWithThread[]>,
+    prisma.summary.count({ where: { userId } })
+  ]);
   const hasExtraRecord = results.length > PAGE_SIZE;
   const items = hasExtraRecord ? results.slice(0, PAGE_SIZE) : results;
-  const filledPage = items.length === PAGE_SIZE;
-  // Optimistically assume more Gmail pages exist if we filled the current page (we only ingest one page at a time).
-  const hasMore = hasExtraRecord || filledPage || Boolean(opts.assumeMore);
-  const totalItems = skip + items.length + (hasExtraRecord ? 1 : 0);
-  const totalPages = hasMore ? currentPage + 1 : currentPage;
+  const hasMore = totalItems > skip + items.length || Boolean(opts.assumeMore);
+  const baseTotalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  const totalPages = hasMore ? Math.max(baseTotalPages, currentPage + 1) : baseTotalPages;
   const nextPage = hasMore ? currentPage + 1 : null;
   return { items, totalItems, totalPages, currentPage, hasMore, nextPage };
 }

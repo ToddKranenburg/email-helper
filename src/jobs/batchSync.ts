@@ -96,7 +96,7 @@ async function syncUser(user: SyncUser): Promise<'ok' | 'skipped' | 'error'> {
       tokenType: token.tokenType,
       expiryDate: token.expiryDate
     });
-    const result = await ingestInboxWithClient(auth, user.id, { maxPages: MAX_PAGES, minNew: MIN_NEW });
+    const result = await ingestInboxWithClient(auth, user.id, { maxPages: MAX_PAGES, minNew: MIN_NEW, prune: true });
     await markSyncResult(user.id, 'ok', null);
     console.log('[batch-sync] synced', { userId: user.id, created: result.created, hasMore: result.hasMore });
     return 'ok';

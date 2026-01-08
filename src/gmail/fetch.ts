@@ -28,6 +28,7 @@ function parseFrom(headerValue: string | null | undefined): { name?: string; ema
 type IngestOptions = {
   maxPages?: number;
   minNew?: number;
+  prune?: boolean;
 };
 
 export async function ingestInbox(session: any, opts: IngestOptions = {}) {
@@ -45,9 +46,13 @@ export async function ingestInboxWithClient(auth: OAuth2Client, userId: string, 
   const limit = pLimit(6);
   const maxPages = Number.isFinite(opts.maxPages) ? Math.max(1, Number(opts.maxPages)) : Infinity;
   const minNew = Number.isFinite(opts.minNew) ? Math.max(0, Number(opts.minNew)) : THREAD_BATCH_SIZE;
+  const prune = Boolean(opts.prune);
+  const listPageLimit = prune ? Infinity : maxPages;
+  const pruneThreadIds = prune ? new Set<string>() : null;
   let pageCount = 0;
   let hasMore = false;
   let createdCount = 0;
+  let processedPages = 0;
 
   do {
     // IMPORTANT: rely on Gmail search "category:primary" to mirror the UI
@@ -64,93 +69,118 @@ export async function ingestInboxWithClient(auth: OAuth2Client, userId: string, 
         Boolean(thread && thread.id)
     );
 
-    await Promise.all(
-      threads.map((thread: gmail_v1.Schema$Thread) =>
-        limit(async () => {
-          const full = await gmail.users.threads.get({ userId: 'me', id: thread.id! });
-          const msgs = (full.data.messages || [])
-            .filter((msg: gmail_v1.Schema$Message | null | undefined): msg is gmail_v1.Schema$Message => Boolean(msg))
-            .slice(-3);
-          const latest = msgs[msgs.length - 1];
-          if (!latest) return;
+    if (pruneThreadIds) {
+      for (const thread of threads) {
+        if (thread.id) pruneThreadIds.add(thread.id);
+      }
+    }
 
-          const hdrs = latest.payload?.headers || [];
-          const findHeader = (name: string) =>
-            hdrs.find((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => Boolean(h?.name) && h.name === name);
-          const subject = findHeader('Subject')?.value || '';
-          const fromRaw = findHeader('From')?.value;
-          const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
-          const latestMsgId = latest.id;
-          if (!latestMsgId) return;
+    const shouldProcess = processedPages < maxPages && createdCount < minNew;
+    if (shouldProcess) {
+      await Promise.all(
+        threads.map((thread: gmail_v1.Schema$Thread) =>
+          limit(async () => {
+            const full = await gmail.users.threads.get({ userId: 'me', id: thread.id! });
+            const msgs = (full.data.messages || [])
+              .filter((msg: gmail_v1.Schema$Message | null | undefined): msg is gmail_v1.Schema$Message => Boolean(msg))
+              .slice(-3);
+            const latest = msgs[msgs.length - 1];
+            if (!latest) return;
 
-          const participants = Array.from(
-            new Set(
-              hdrs
-                .filter((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => {
-                  if (!h?.name) return false;
-                  return ['From', 'To', 'Cc'].includes(h.name);
-                })
-                .flatMap(h => (h.value?.split(',') || []))
-                .map(s => s.trim())
-                .filter(Boolean)
-            )
-          );
+            const hdrs = latest.payload?.headers || [];
+            const findHeader = (name: string) =>
+              hdrs.find((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => Boolean(h?.name) && h.name === name);
+            const subject = findHeader('Subject')?.value || '';
+            const fromRaw = findHeader('From')?.value;
+            const { name: fromName, email: fromEmail } = parseFrom(fromRaw);
+            const latestMsgId = latest.id;
+            if (!latestMsgId) return;
 
-          const threadId = full.data.id!;
-          if (!threadId) return;
+            const participants = Array.from(
+              new Set(
+                hdrs
+                  .filter((h): h is gmail_v1.Schema$MessagePartHeader & { name: string } => {
+                    if (!h?.name) return false;
+                    return ['From', 'To', 'Cc'].includes(h.name);
+                  })
+                  .flatMap(h => (h.value?.split(',') || []))
+                  .map(s => s.trim())
+                  .filter(Boolean)
+              )
+            );
 
-          await prisma.thread.upsert({
-            where: { id_userId: { id: threadId, userId } },
-            update: {
-              subject,
-              participants: JSON.stringify(participants),
-              lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
-              historyId: full.data.historyId,
-              fromName,
-              fromEmail,
-              userId
-            },
-            create: {
-              id: threadId,
-              userId,
-              subject,
-              participants: JSON.stringify(participants),
-              lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
-              historyId: full.data.historyId,
-              fromName,
-              fromEmail
-            }
-          });
+            const threadId = full.data.id!;
+            if (!threadId) return;
 
-          // Skip if we've already summarized this latest message
-          const existing = await prisma.summary.findUnique({
-            where: {
-              userId_lastMsgId: {
+            await prisma.thread.upsert({
+              where: { id_userId: { id: threadId, userId } },
+              update: {
+                subject,
+                participants: JSON.stringify(participants),
+                lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
+                historyId: full.data.historyId,
+                fromName,
+                fromEmail,
+                userId
+              },
+              create: {
+                id: threadId,
                 userId,
-                lastMsgId: latestMsgId
+                subject,
+                participants: JSON.stringify(participants),
+                lastMessageTs: new Date(latest.internalDate ? Number(latest.internalDate) : Date.now()),
+                historyId: full.data.historyId,
+                fromName,
+                fromEmail
               }
-            }
-          });
-          if (existing) return;
+            });
 
-          const convoText = msgs
-            .map(m => normalizeBody(m.payload))
-            .filter(Boolean)
-            .reverse()
-            .join('\n\n---\n\n');
+            // Skip if we've already summarized this latest message
+            const existing = await prisma.summary.findUnique({
+              where: {
+                userId_lastMsgId: {
+                  userId,
+                  lastMsgId: latestMsgId
+                }
+              }
+            });
+            if (existing) return;
 
-          const created = await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, userId);
-          if (created) createdCount += 1;
-        })
-      )
-    );
+            const convoText = msgs
+              .map(m => normalizeBody(m.payload))
+              .filter(Boolean)
+              .reverse()
+              .join('\n\n---\n\n');
+
+            const created = await summarizeAndStore(threadId, latestMsgId, subject, participants, convoText, userId);
+            if (created) createdCount += 1;
+          })
+        )
+      );
+      processedPages += 1;
+    }
 
     pageToken = list.data.nextPageToken || undefined;
-    hasMore = hasMore || Boolean(pageToken);
     pageCount += 1;
-    if (createdCount >= minNew) break;
-    if (pageCount >= maxPages) break;
+    if (!prune) {
+      if (createdCount >= minNew || processedPages >= maxPages) {
+        hasMore = Boolean(pageToken);
+        break;
+      }
+    }
+    if (pageCount >= listPageLimit) {
+      hasMore = Boolean(pageToken);
+      break;
+    }
   } while (pageToken);
+
+  if (!pageToken) {
+    hasMore = false;
+  }
+
+  if (pruneThreadIds) {
+    await pruneStaleThreads(userId, pruneThreadIds);
+  }
 
   return { hasMore, created: createdCount };
 }
@@ -205,4 +235,14 @@ async function summarizeAndStore(
   });
 
   return Boolean(created?.id);
+}
+
+async function pruneStaleThreads(userId: string, threadIds: Set<string>) {
+  const ids = Array.from(threadIds);
+  await prisma.thread.deleteMany({
+    where: {
+      userId,
+      id: { notIn: ids }
+    }
+  });
 }

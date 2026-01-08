@@ -56,6 +56,9 @@
     taskClose: document.getElementById('task-close'),
     reviewList: document.getElementById('review-list')
   };
+  const loadingOverlay = document.getElementById('loading');
+  const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
+  const OVERLAY_OWNER = 'secretary';
 
   if (!refs.chatLog || !refs.chatForm || !refs.emailEmpty) {
     return;
@@ -532,6 +535,8 @@
 
   async function fetchNextPage(reason) {
     if (!state.hasMore || state.loadingMore) return [];
+    const overlayActive = reason === 'auto';
+    if (overlayActive) showLoadingOverlay('Loading more emails…');
     state.loadingMore = true;
     updateLoadMoreButtons();
     updateDrawerLists();
@@ -571,6 +576,7 @@
       return [];
     } finally {
       state.loadingMore = false;
+      if (overlayActive) hideLoadingOverlay();
       updateDrawerLists();
       updateLoadMoreButtons();
       nudgeComposer('Loaded more - type your next move here.', { focus: false });
@@ -1841,15 +1847,46 @@
     clearPendingSuggestedAction(threadId);
 
     if (!state.needs.length) {
+      if (state.hasMore) {
+        autoLoadNextBatch();
+      } else {
+        setEmptyState('All emails reviewed. Nice work.');
+        toggleComposer(false);
+      }
+      return;
+    }
+    const nextId = getNextUnreviewedAfter(threadId);
+    if (nextId) {
+      setActiveThread(nextId);
+      return;
+    }
+    if (state.hasMore) {
+      autoLoadNextBatch();
+    } else {
+      setEmptyState('All emails reviewed. Nice work.');
+      toggleComposer(false);
+    }
+  }
+
+  async function autoLoadNextBatch() {
+    if (state.loadingMore || !state.hasMore) return;
+    setEmptyState('Loading more emails…');
+    toggleComposer(false);
+    const added = await fetchNextPage('auto');
+    if (added.length) {
+      const nextId = state.needs.find(id => !reviewedIds.has(id));
+      if (nextId) {
+        setActiveThread(nextId);
+        return;
+      }
+    }
+    if (!added.length) {
       const message = state.hasMore
-        ? 'You reviewed everything loaded. Tap Load more to keep going.'
+        ? 'Unable to load more emails. Tap Load more to retry.'
         : 'All emails reviewed. Nice work.';
       setEmptyState(message);
       toggleComposer(false);
-      return;
     }
-    const nextId = state.needs[index] || state.needs[0];
-    setActiveThread(nextId);
   }
 
   function advanceToNextThread(threadId = state.activeId) {
@@ -1875,10 +1912,36 @@
     updateQueuePill();
     closeTaskPanel(true);
     clearPendingSuggestedAction(threadId);
-    if (!hasRoomToAdvance) return;
+    const nextId = getNextUnreviewedAfter(threadId);
+    if (nextId) {
+      setActiveThread(nextId);
+      return;
+    }
+    if (state.hasMore) {
+      autoLoadNextBatch();
+      return;
+    }
+    if (!hasRoomToAdvance) {
+      setEmptyState('All emails reviewed. Nice work.');
+      toggleComposer(false);
+      return;
+    }
     const nextIndex = index === -1 ? 0 : (index + 1) % state.needs.length;
-    const nextId = state.needs[nextIndex] || state.needs[0];
-    setActiveThread(nextId);
+    const fallbackId = state.needs[nextIndex] || state.needs[0];
+    if (fallbackId) {
+      setActiveThread(fallbackId);
+    }
+  }
+
+  function getNextUnreviewedAfter(threadId) {
+    if (!state.needs.length) return '';
+    const startIndex = Math.max(0, state.needs.indexOf(threadId) + 1);
+    for (let offset = 0; offset < state.needs.length; offset += 1) {
+      const index = (startIndex + offset) % state.needs.length;
+      const candidate = state.needs[index];
+      if (!reviewedIds.has(candidate)) return candidate;
+    }
+    return '';
   }
 
   function handleAutoIntent(intent, userText, options = {}) {
@@ -2142,6 +2205,20 @@
     renderChat();
     updateQueuePill();
     updateLoadMoreButtons();
+  }
+
+  function showLoadingOverlay(message) {
+    if (!loadingOverlay) return;
+    loadingOverlay.dataset.owner = OVERLAY_OWNER;
+    loadingOverlay.classList.remove('hidden');
+    if (loadingText && message) loadingText.textContent = message;
+  }
+
+  function hideLoadingOverlay() {
+    if (!loadingOverlay) return;
+    if (loadingOverlay.dataset.owner !== OVERLAY_OWNER) return;
+    delete loadingOverlay.dataset.owner;
+    loadingOverlay.classList.add('hidden');
   }
 
   async function detectIntent(text) {
