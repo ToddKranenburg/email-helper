@@ -86,7 +86,8 @@
     hydrated: new Set(),
     hydrating: new Set(),
     pendingSuggestedActions: new Map(),
-    seenThreads: new Set()
+    seenThreads: new Set(),
+    mustKnowByThread: new Map()
   };
   const assistantQueues = new Map();
   const pendingTranscripts = new Map();
@@ -1048,7 +1049,9 @@
     btn.type = 'button';
     btn.className = buildThreadClass(variant, { active: threadId === state.activeId });
     btn.dataset.threadId = threadId;
-    btn.innerHTML = `<strong>${htmlEscape(thread.from || 'Unknown sender')}</strong><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
+    const receivedAt = thread.receivedAt ? formatQueueTimestamp(thread.receivedAt) : '';
+    const timeHtml = receivedAt ? `<span class="queue-item-time">${htmlEscape(receivedAt)}</span>` : '';
+    btn.innerHTML = `<div class="queue-item-header"><strong>${htmlEscape(thread.from || 'Unknown sender')}</strong>${timeHtml}</div><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
     li.appendChild(btn);
     listEl.appendChild(li);
   }
@@ -1389,28 +1392,33 @@
       const meta = htmlEscape([sender, timestamp].filter(Boolean).join(' • '));
       const initials = initialsFromSender(entry.sender || entry.label || '');
       const link = entry.link ? escapeAttribute(entry.link) : '';
+      const mustKnow = state.mustKnowByThread.get(entry.threadId) || '';
       const linkHtml = link
         ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
         : '';
+      const summaryHtml = mustKnow
+        ? `<div class="chat-divider-summary"><span class="chat-divider-summary-icon" aria-hidden="true">✨</span><div>${renderAssistantMarkdown(mustKnow)}</div></div>`
+        : '';
       return `
           <div class="chat-divider">
-            <span class="chat-divider-line" aria-hidden="true"></span>
             <div class="chat-divider-card">
-              <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
-              <div class="chat-divider-content">
-                <p class="chat-divider-meta">${meta}</p>
-                <p class="chat-divider-subject">${subject || label}</p>
-                ${linkHtml}
+              <div class="chat-divider-body">
+                <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
+                <div class="chat-divider-content">
+                  <p class="chat-divider-meta">${meta}</p>
+                  <p class="chat-divider-subject">${subject || label}</p>
+                  ${linkHtml}
+                </div>
               </div>
+              ${summaryHtml}
             </div>
-            <span class="chat-divider-line" aria-hidden="true"></span>
           </div>
         `;
     }
     if (entry.type === 'turn') {
       const turn = entry.turn;
       if (turn.role === 'assistant') {
-        return `<div class="chat-message assistant"><div class="chat-card">${renderAssistantMarkdown(turn.content)}</div></div>`;
+        return `<div class="chat-message assistant"><div class="assistant-avatar" aria-hidden="true">S</div><div class="chat-card">${renderAssistantMarkdown(turn.content)}</div></div>`;
       }
       return `<div class="chat-message user"><div class="chat-card">${renderPlainText(turn.content, { preserveLineBreaks: true })}</div></div>`;
     }
@@ -1426,7 +1434,7 @@
       logDebug('renderTranscriptEntry missing messageType', entry);
     }
     if (entry.messageType === 'must_know') {
-      return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Must know</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+      return '';
     }
     if (entry.messageType === 'suggested_action') {
       const actionType = normalizeActionType(entry?.payload?.actionType);
@@ -1435,8 +1443,8 @@
         const steps = externalAction?.steps || entry.content || '';
         const linksMarkup = renderExternalLinks(externalAction?.links || []);
         return `<div class="chat-message assistant">
+          <div class="assistant-avatar" aria-hidden="true">S</div>
           <div class="chat-card suggested-card">
-            <p class="chat-badge">External action</p>
             <p class="suggested-copy">${renderPlainText(steps, { preserveLineBreaks: true })}</p>
             ${linksMarkup}
           </div>
@@ -1446,21 +1454,21 @@
       const disabled = actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip';
       const label = suggestedActionLabel(agenticType);
       return `<div class="chat-message assistant">
-        <div class="chat-card suggested-card">
-          <p class="chat-badge">Suggested action</p>
+        <div class="assistant-avatar" aria-hidden="true">S</div>
+        <div class="chat-card">
           <p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>
-          <div class="suggested-actions">
-            <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(agenticType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
-          </div>
         </div>
+      </div>
+      <div class="suggested-action-row" role="group" aria-label="Suggested action">
+        <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(agenticType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
       </div>`;
     }
     if (entry.messageType === 'draft_details') {
       const draft = normalizeDraftPayload(entry.payload);
       const due = draft.dueDate ? `Due ${formatFriendlyDate(draft.dueDate)}` : 'No due date';
       return `<div class="chat-message assistant">
+        <div class="assistant-avatar" aria-hidden="true">S</div>
         <div class="chat-card draft-card" data-thread-id="${escapeAttribute(entry.threadId)}">
-          <p class="chat-badge">Task draft</p>
           <p><strong>Title:</strong> ${htmlEscape(draft.title || 'New task')}</p>
           <p><strong>Notes:</strong> ${htmlEscape(draft.notes || 'None')}</p>
           <p><strong>Due:</strong> ${htmlEscape(due)}</p>
@@ -1475,8 +1483,8 @@
       const draft = normalizeDraftPayload(entry.payload);
       const editorId = entry.id || `${entry.threadId}-editor`;
       return `<div class="chat-message assistant">
+        <div class="assistant-avatar" aria-hidden="true">S</div>
         <div class="chat-card draft-editor" data-editor-id="${escapeAttribute(editorId)}" data-thread-id="${escapeAttribute(entry.threadId)}">
-          <p class="chat-badge">Edit task</p>
           <div class="task-field"><label>Title</label><input type="text" data-field="title" value="${escapeAttribute(draft.title || '')}" /></div>
           <div class="task-field"><label>Notes</label><textarea data-field="notes">${htmlEscape(draft.notes || '')}</textarea></div>
           <div class="task-field"><label>Due date</label><input type="date" data-field="dueDate" value="${escapeAttribute(draft.dueDate || '')}" /></div>
@@ -1488,9 +1496,9 @@
       </div>`;
     }
     if (entry.messageType === 'action_result') {
-      return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">Result</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+      return `<div class="chat-message assistant"><div class="assistant-avatar" aria-hidden="true">S</div><div class="chat-card">${renderAssistantMarkdown(entry.content)}</div></div>`;
     }
-    return `<div class="chat-message assistant"><div class="chat-card"><p class="chat-badge">${htmlEscape(entry.messageType || 'Note')}</p>${renderAssistantMarkdown(entry.content)}</div></div>`;
+    return `<div class="chat-message assistant"><div class="assistant-avatar" aria-hidden="true">S</div><div class="chat-card">${renderAssistantMarkdown(entry.content)}</div></div>`;
   }
 
   function renderExternalLinks(links) {
@@ -1686,6 +1694,10 @@
   }
 
   function applyTranscriptEntryEffects(threadId, entry) {
+    if (entry.messageType === 'must_know') {
+      const mustKnow = typeof entry.content === 'string' ? entry.content.trim() : '';
+      if (mustKnow) state.mustKnowByThread.set(threadId, mustKnow);
+    }
     if (entry.messageType === 'suggested_action') {
       const suggested = normalizeSuggestedAction(entry?.payload?.actionType);
       if (suggested) setPendingSuggestedAction(threadId, suggested);
@@ -2198,6 +2210,13 @@
     const date = new Date(iso);
     if (!Number.isFinite(date.getTime())) return 'Timestamp unavailable';
     return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function formatQueueTimestamp(iso) {
+    if (!iso) return '';
+    const date = new Date(iso);
+    if (!Number.isFinite(date.getTime())) return '';
+    return date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
   }
 
   function formatEmailPosition(threadId) {
