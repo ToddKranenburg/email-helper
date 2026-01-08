@@ -42,7 +42,7 @@ export type AutoSummaryContext = {
   transcript: string;
 };
 
-export async function ensureAutoSummaryCards(ctx: AutoSummaryContext) {
+export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { forceFresh?: boolean } = {}) {
   const [existingFlow, existingMessages] = await Promise.all([
     prisma.actionFlow.findUnique({
       where: { userId_threadId: { userId: ctx.userId, threadId: ctx.threadId } }
@@ -53,7 +53,41 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext) {
     })
   ]);
 
-  if (existingFlow && existingFlow.lastMessageId === ctx.lastMessageId) {
+  const forceFresh = Boolean(opts.forceFresh);
+  if (forceFresh && existingFlow && existingFlow.lastMessageId === ctx.lastMessageId) {
+    const keepMessages = existingMessages.filter(message => message.type === 'must_know' || message.type === 'suggested_action');
+    if (keepMessages.length) {
+      const result = await prisma.$transaction(async tx => {
+        await tx.transcriptMessage.deleteMany({
+          where: {
+            userId: ctx.userId,
+            threadId: ctx.threadId,
+            type: { notIn: ['must_know', 'suggested_action'] }
+          }
+        });
+        const flow = await tx.actionFlow.upsert({
+          where: { userId_threadId: { userId: ctx.userId, threadId: ctx.threadId } },
+          update: {
+            state: 'suggested',
+            draftPayload: null,
+            lastMessageId: ctx.lastMessageId
+          },
+          create: {
+            userId: ctx.userId,
+            threadId: ctx.threadId,
+            actionType: existingFlow.actionType,
+            state: 'suggested',
+            draftPayload: null,
+            lastMessageId: ctx.lastMessageId
+          }
+        });
+        return { flow, messages: serializeMessages(keepMessages) };
+      });
+      return result;
+    }
+  }
+
+  if (existingFlow && existingFlow.lastMessageId === ctx.lastMessageId && !forceFresh) {
     if (existingFlow.actionType === 'skip' && existingFlow.state === 'completed') {
       return { flow: existingFlow, messages: serializeMessages(existingMessages) };
     }

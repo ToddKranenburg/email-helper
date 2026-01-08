@@ -10,7 +10,7 @@ import { normalizeBody } from '../gmail/normalize.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
-import type { Summary, Thread, ActionFlow, TranscriptMessage } from '@prisma/client';
+import type { Summary, Thread, ActionFlow } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
 import {
@@ -20,7 +20,6 @@ import {
   openInlineEditor,
   saveEditedDraft,
   appendActionResult,
-  serializeTimelineMessages,
   type ActionType,
   type ActionState,
   type TimelineMessage
@@ -267,6 +266,7 @@ router.post('/secretary/auto-summarize', async (req: Request, res: Response) => 
   }
   if (ensureScopesForApi(sessionData, res)) return;
   const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  const forceFresh = Boolean(req.body?.fresh);
   if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
   const context = await loadThreadContext(sessionData.user.id, threadId, req);
   if (!context) return res.status(404).json({ error: 'Email summary not found.' });
@@ -283,7 +283,7 @@ router.post('/secretary/auto-summarize', async (req: Request, res: Response) => 
       nextStep: context.summary.nextStep,
       participants: context.participants,
       transcript: context.transcript
-    });
+    }, { forceFresh });
     const timeline = await fetchTimeline(sessionData.user.id, threadId);
     return res.json({ flow: ensured.flow, timeline });
   } catch (err) {
@@ -771,54 +771,11 @@ async function loadPageWithOpts(userId: string, requestedPage: number, opts: { a
 
 async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): Promise<SecretaryThread[]> {
   const threadIds = items.map(item => item.threadId);
-  const [flows, transcripts] = await Promise.all([
-    prisma.actionFlow.findMany({
-      where: { userId, threadId: { in: threadIds } }
-    }),
-    prisma.transcriptMessage.findMany({
-      where: { userId, threadId: { in: threadIds } },
-      orderBy: { createdAt: 'asc' }
-    })
-  ]);
-
-  const flowMap = new Map<string, ActionFlow>();
-  for (const flow of flows) {
-    flowMap.set(flow.threadId, flow);
-  }
-
-  const transcriptMap = new Map<string, TranscriptMessage[]>();
-  for (const msg of transcripts) {
-    const bucket = transcriptMap.get(msg.threadId) || [];
-    bucket.push(msg);
-    transcriptMap.set(msg.threadId, bucket);
-  }
 
   const threads: SecretaryThread[] = [];
   for (const item of items) {
     const participants = parseParticipants(item.Thread?.participants);
     const emailTs = item.Thread?.lastMessageTs ? new Date(item.Thread.lastMessageTs) : new Date(item.createdAt);
-    let timeline = serializeTimelineMessages(transcriptMap.get(item.threadId) || []);
-    let flow = flowMap.get(item.threadId) || null;
-
-    if (!timeline.length) {
-      try {
-        const ensured = await ensureAutoSummaryCards({
-          userId,
-          threadId: item.threadId,
-          lastMessageId: item.lastMsgId,
-          subject: item.Thread?.subject || '',
-          headline: item.headline,
-          summary: item.tldr,
-          nextStep: item.nextStep,
-          participants,
-          transcript: item.convoText || ''
-        });
-        timeline = ensured.messages;
-        flow = ensured.flow;
-      } catch (err) {
-        console.error('failed to ensure auto summaries for thread', { threadId: item.threadId, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
 
     threads.push({
       threadId: item.threadId,
@@ -833,8 +790,8 @@ async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): 
       receivedAt: emailTs.toISOString(),
       convo: item.convoText || '',
       participants,
-      actionFlow: flow || null,
-      timeline
+      actionFlow: null,
+      timeline: []
     });
   }
 

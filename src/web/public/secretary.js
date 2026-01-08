@@ -414,7 +414,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ threadId })
+        body: JSON.stringify({ threadId, fresh: true })
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || 'Unable to prep this email.');
