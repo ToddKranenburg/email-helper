@@ -2,7 +2,7 @@ import { Prisma, type ActionFlow, type TranscriptMessage } from '@prisma/client'
 import { prisma } from '../store/db.js';
 import { AutoSummaryResult, generateAutoSummary, generateTaskDraft, TaskDraft } from '../llm/autoActions.js';
 
-export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action';
+export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action' | 'reply';
 export type ActionState = 'suggested' | 'draft_ready' | 'editing' | 'executing' | 'completed' | 'failed';
 export type TranscriptType =
   | 'must_know'
@@ -110,7 +110,9 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
   const prompt = generated.suggestedAction?.userFacingPrompt
     || (actionType === 'external_action'
       ? 'This needs your attention outside the app. Here are the key links.'
-      : 'Skip for now and move to the next email?');
+      : actionType === 'reply'
+        ? 'Draft a reply to the sender?'
+        : 'Skip for now and move to the next email?');
   const mustKnow = generated.mustKnow || ctx.summary || ctx.headline || ctx.subject || 'New email.';
 
   const result = await prisma.$transaction(async tx => {

@@ -52,6 +52,7 @@
     chatError: document.getElementById('assistant-error'),
     chatHint: document.getElementById('assistant-hint'),
     reviewBtn: document.getElementById('action-review'),
+    replyBtn: document.getElementById('action-reply'),
     archiveBtn: document.getElementById('action-archive'),
     taskBtn: document.getElementById('action-task'),
     skipBtn: document.getElementById('action-skip'),
@@ -68,6 +69,15 @@
     taskReset: document.getElementById('task-reset'),
     taskClose: document.getElementById('task-close'),
     priorityList: document.getElementById('priority-list'),
+    replyPanel: document.getElementById('reply-panel'),
+    replyPanelHelper: document.getElementById('reply-panel-helper'),
+    replyTo: document.getElementById('reply-to'),
+    replySubject: document.getElementById('reply-subject'),
+    replyBody: document.getElementById('reply-body'),
+    replyError: document.getElementById('reply-error'),
+    replyCancel: document.getElementById('reply-cancel'),
+    replySubmit: document.getElementById('reply-submit'),
+    replyClose: document.getElementById('reply-close'),
     reviewList: document.getElementById('review-list')
   };
   const loadingOverlay = document.getElementById('loading');
@@ -119,6 +129,16 @@
     values: { title: '', notes: '', due: '' },
     error: '',
     lastSourceId: ''
+  };
+  const replyState = {
+    open: false,
+    status: 'idle', // idle | sending | error
+    values: { to: '', subject: '', body: '' },
+    error: '',
+    lastSourceId: '',
+    baseBody: '',
+    suggested: '',
+    suggesting: false
   };
   const reviewedIds = new Set();
   let composerNudgeTimer = 0;
@@ -192,6 +212,9 @@
     if (refs.reviewBtn) {
       refs.reviewBtn.addEventListener('click', () => requestReview());
     }
+    if (refs.replyBtn) {
+      refs.replyBtn.addEventListener('click', () => openReplyPanel());
+    }
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
     }
@@ -245,6 +268,14 @@
     if (refs.taskTitle) refs.taskTitle.addEventListener('input', syncTaskValues);
     if (refs.taskNotes) refs.taskNotes.addEventListener('input', syncTaskValues);
     if (refs.taskDue) refs.taskDue.addEventListener('input', syncTaskValues);
+    if (refs.replySubmit) {
+      refs.replySubmit.addEventListener('click', async (event) => {
+        await submitReply(event);
+      });
+    }
+    if (refs.replyCancel) refs.replyCancel.addEventListener('click', () => closeReplyPanel(true));
+    if (refs.replyClose) refs.replyClose.addEventListener('click', () => closeReplyPanel(true));
+    if (refs.replyBody) refs.replyBody.addEventListener('input', syncReplyValues);
   }
 
   function handleThreadListClick(event, variant) {
@@ -347,7 +378,7 @@
     appendTurn(state.activeId, { role: 'user', content: question });
     renderChat();
     refs.chatInput.value = '';
-    toggleComposer(false, { preserveTaskPanel: pendingCreate || taskState.open });
+    toggleComposer(false, { preserveTaskPanel: pendingCreate || taskState.open, preserveReplyPanel: replyState.open });
     startAssistantTyping(state.activeId);
     const submitBtn = refs.chatForm.querySelector('button[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
@@ -383,6 +414,13 @@
         toggleComposer(Boolean(state.activeId));
         if (submitBtn) submitBtn.disabled = false;
         await handleArchiveIntent(question, { alreadyLogged: true });
+        return;
+      }
+      if (intent === 'reply') {
+        stopAssistantTyping(state.activeId);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
+        openReplyPanelFromPrompt(question);
         return;
       }
       if (intent === 'create_task') {
@@ -430,6 +468,11 @@
     const normalized = normalizeSuggestedAction(actionType);
     if (!normalized) return;
     clearPendingSuggestedAction(threadId);
+    if (normalized === 'reply') {
+      if (threadId && threadId !== state.activeId) setActiveThread(threadId);
+      openReplyPanel();
+      return;
+    }
     if (normalized === 'create_task') {
       await requestDraft(threadId, 'generate');
       return;
@@ -634,6 +677,9 @@
     if (!thread) return;
     if (taskState.open && taskState.lastSourceId !== threadId) {
       closeTaskPanel(true);
+    }
+    if (replyState.open && replyState.lastSourceId !== threadId) {
+      closeReplyPanel(true);
     }
     if (state.pendingCreateThreadId && state.pendingCreateThreadId !== threadId) {
       clearPendingCreate();
@@ -849,6 +895,7 @@
     if (!state.activeId || !refs.taskPanel) return;
     const thread = state.lookup.get(state.activeId);
     if (!thread) return;
+    closeReplyPanel(true);
     refreshTaskSuggestion(thread);
     taskState.open = true;
     taskState.status = 'idle';
@@ -944,6 +991,298 @@
       result = { ok: false, error: taskState.error };
     } finally {
       renderTaskPanel();
+    }
+    return result;
+  }
+
+  function renderReplyPanel() {
+    if (!refs.replyPanel || !refs.replyBody || !refs.replyTo || !refs.replySubject) return;
+    const showPanel = replyState.open;
+    refs.replyPanel.classList.toggle('hidden', !showPanel);
+    refs.replyPanel.classList.toggle('loading', replyState.status === 'sending');
+    refs.replyTo.textContent = replyState.values.to || 'Unknown sender';
+    refs.replySubject.textContent = replyState.values.subject || '(no subject)';
+    refs.replyBody.value = replyState.values.body || '';
+
+    const disabled = replyState.status === 'sending';
+    refs.replyBody.disabled = disabled;
+    if (refs.replySubmit) {
+      refs.replySubmit.disabled = disabled;
+      refs.replySubmit.textContent = disabled ? 'Sending…' : 'Send reply';
+    }
+    if (refs.replyCancel) refs.replyCancel.disabled = disabled;
+    if (refs.replyClose) refs.replyClose.disabled = disabled;
+
+    if (refs.replyError) {
+      refs.replyError.textContent = replyState.error || '';
+      refs.replyError.classList.toggle('hidden', !replyState.error);
+    }
+    if (refs.replyPanelHelper) {
+      if (replyState.suggesting) {
+        refs.replyPanelHelper.textContent = 'Drafting a suggested reply...';
+      } else if (replyState.suggested) {
+        refs.replyPanelHelper.textContent = 'Suggested reply added. Edit anything before sending.';
+      } else {
+        refs.replyPanelHelper.textContent = 'Send a quick response without leaving the queue.';
+      }
+    }
+  }
+
+  function openReplyPanel(options = {}) {
+    const opts = options instanceof Event ? {} : options;
+    const preserveValues = Boolean(opts.preserveValues);
+    const prefillBody = typeof opts.prefillBody === 'string' ? opts.prefillBody.trim() : '';
+    const skipSuggestion = Boolean(opts.skipSuggestion || prefillBody);
+    if (!state.activeId || !refs.replyPanel) return;
+    const thread = state.lookup.get(state.activeId);
+    if (!thread) return;
+    closeTaskPanel(true);
+    clearPendingSuggestedAction(thread.threadId);
+    const sameSource = replyState.lastSourceId === thread.threadId;
+    replyState.open = true;
+    replyState.status = 'idle';
+    replyState.error = '';
+    replyState.lastSourceId = thread.threadId;
+    if (!preserveValues || !sameSource) {
+      const draft = buildReplyDraft(thread);
+      const baseBody = draft.body || '';
+      if (prefillBody) {
+        draft.body = mergeReplyBody(baseBody, prefillBody);
+      }
+      replyState.values = draft;
+      replyState.baseBody = prefillBody ? baseBody : draft.body || '';
+      replyState.suggested = '';
+      replyState.suggesting = false;
+    }
+    renderReplyPanel();
+    if (refs.replyBody) refs.replyBody.focus();
+    if (!preserveValues || !sameSource) {
+      if (skipSuggestion) return;
+      requestReplyDraft(thread.threadId);
+    }
+  }
+
+  function closeReplyPanel(resetValues) {
+    if (!refs.replyPanel) return;
+    replyState.open = false;
+    if (resetValues) {
+      replyState.status = 'idle';
+      replyState.error = '';
+      replyState.values = { to: '', subject: '', body: '' };
+      replyState.baseBody = '';
+      replyState.suggested = '';
+      replyState.suggesting = false;
+    }
+    renderReplyPanel();
+  }
+
+  function syncReplyValues() {
+    if (!refs.replyBody) return;
+    replyState.values.body = refs.replyBody.value;
+    replyState.error = '';
+    if (refs.replyError) refs.replyError.classList.add('hidden');
+  }
+
+  function buildReplyDraft(thread) {
+    const fallbackParticipant = Array.isArray(thread.participants) && thread.participants.length
+      ? thread.participants[0]
+      : '';
+    const to = thread.from || fallbackParticipant || '';
+    const subject = formatReplySubject(thread.subject || '');
+    const greeting = buildReplyGreeting(to);
+    return {
+      to: to || 'Unknown sender',
+      subject,
+      body: greeting
+    };
+  }
+
+  function buildReplyGreeting(fromLine) {
+    const name = extractFirstName(fromLine);
+    if (!name) return '';
+    return `Hi ${name},\n\n`;
+  }
+
+  function extractFirstName(fromLine) {
+    const raw = (fromLine || '').replace(/<[^>]+>/g, '').replace(/\"/g, '').trim();
+    if (!raw || /@/.test(raw)) return '';
+    const first = raw.split(/\s+/)[0];
+    return first && /@/.test(first) ? '' : first;
+  }
+
+  function formatReplySubject(subject) {
+    const trimmed = (subject || '').trim();
+    if (!trimmed) return 'Re:';
+    if (/^re:/i.test(trimmed)) return trimmed;
+    return `Re: ${trimmed}`;
+  }
+
+  async function requestReplyDraft(threadId) {
+    if (!threadId || replyState.suggesting) return;
+    replyState.suggesting = true;
+    renderReplyPanel();
+    try {
+      const resp = await fetch('/secretary/reply-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to draft a reply.');
+      }
+      const suggestion = typeof data?.body === 'string' ? data.body.trim() : '';
+      const shouldApply = Boolean(data?.suggested && suggestion);
+      if (!shouldApply) return;
+      if (!replyState.open || replyState.lastSourceId !== threadId) return;
+      const current = (replyState.values.body || '').trim();
+      const base = (replyState.baseBody || '').trim();
+      if (current && current !== base) return;
+      replyState.values.body = mergeReplyBody(replyState.baseBody || '', suggestion);
+      replyState.suggested = suggestion;
+      renderReplyPanel();
+    } catch (err) {
+      console.error('Reply draft request failed', err);
+    } finally {
+      replyState.suggesting = false;
+      renderReplyPanel();
+    }
+  }
+
+  function mergeReplyBody(base, suggestion) {
+    const baseText = String(base || '').replace(/\s+$/, '');
+    const suggestionText = String(suggestion || '').trim();
+    if (!suggestionText) return baseText;
+    if (!baseText) return suggestionText;
+    return `${baseText}\n\n${suggestionText}`;
+  }
+
+  function openReplyPanelFromPrompt(userText) {
+    const prefill = extractReplyBodyFromPrompt(userText);
+    if (prefill) {
+      openReplyPanel({ prefillBody: prefill, skipSuggestion: true });
+      return;
+    }
+    openReplyPanel();
+  }
+
+  function extractReplyBodyFromPrompt(rawText) {
+    const raw = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!raw) return '';
+
+    const quoted = extractQuotedReply(raw);
+    if (quoted) return normalizeReplyPrefill(quoted);
+
+    const patterns = [
+      /(?:^|\b)(?:reply|respond|send a reply|send a response|email back|write back)(?:\s+to\s+[^,.:;-]+)?\s*(?:with|saying|and say|and tell|and ask|to say|to tell|to ask|that|:|-|,)\s*(.+)$/i,
+      /(?:^|\b)(?:tell|let)\s+(?:him|her|them)\s+(?:know\s+)?(?:that\s+)?(.+)$/i,
+      /(?:^|\b)ask\s+(?:him|her|them)?\s*(.+)$/i,
+      /(?:^|\b)say\s+(?:that\s+)?(.+)$/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      if (match && match[1]) {
+        const candidate = normalizeReplyPrefill(match[1]);
+        if (candidate) return candidate;
+      }
+    }
+
+    const fallback = extractReplyAfterLead(raw);
+    return fallback ? normalizeReplyPrefill(fallback) : '';
+  }
+
+  function extractQuotedReply(text) {
+    const doubleMatch = text.match(/(?:^|\s)"([^"]{2,})"(?:\s|$)/);
+    if (doubleMatch?.[1]) return doubleMatch[1].trim();
+    const singleMatch = text.match(/(?:^|\s)'([^']{2,})'(?:\s|$)/);
+    return singleMatch?.[1]?.trim() || '';
+  }
+
+  function extractReplyAfterLead(text) {
+    const cleaned = text.replace(/\s+/g, ' ').trim();
+    if (!cleaned) return '';
+    const match = cleaned.match(/^\s*(?:please\s+)?(?:reply back|reply|respond|send a reply|send a response|email back|write back)\s+(?!to\b)(.+)$/i);
+    let remainder = match?.[1]?.trim() || '';
+    remainder = remainder.replace(/^back\s+/i, '');
+    remainder = remainder.replace(/^and\s+/i, '');
+    remainder = remainder.replace(/^(?:say|tell|ask)\s+/i, '');
+    return remainder.trim();
+  }
+
+  function normalizeReplyPrefill(text) {
+    let body = String(text || '').trim();
+    if (!body) return '';
+    body = body.replace(/^[\s"'`]+|[\s"'`]+$/g, '');
+    body = body.replace(/^(?:that|please)\s+/i, '').trim();
+    if (!body) return '';
+    const lower = body.toLowerCase();
+    const discard = new Set(['please', 'pls', 'plz', 'thanks', 'thank you', 'ok', 'okay']);
+    if (discard.has(lower)) return '';
+    if (/^if\s+/i.test(body) && !/[?]$/.test(body)) {
+      const clause = body.replace(/^if\s+/i, '').trim();
+      if (clause) return `Could you let me know if ${clause}?`;
+    }
+    if (!/[.!?]$/.test(body)) {
+      body = `${body}.`;
+    }
+    return body;
+  }
+
+  async function submitReply(event) {
+    if (event instanceof Event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+    if (!state.activeId || !refs.replySubmit) return { ok: false, error: 'No email selected.' };
+    const threadId = state.activeId;
+    const body = (replyState.values.body || '').trim();
+    if (!body) {
+      replyState.error = 'Write a reply before sending.';
+      replyState.status = 'error';
+      renderReplyPanel();
+      return { ok: false, error: replyState.error };
+    }
+    replyState.error = '';
+    replyState.status = 'sending';
+    renderReplyPanel();
+    let result = { ok: false, error: '' };
+    try {
+      const resp = await fetch('/secretary/action/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          threadId,
+          actionType: 'reply',
+          draft: { body }
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to send that reply.');
+      }
+      if (data.flow) updateActionFlow(threadId, data.flow);
+      if (Array.isArray(data.timeline)) {
+        syncTimelineFromServer(threadId, data.timeline);
+      }
+      if (replyState.open && replyState.lastSourceId === threadId) {
+        closeReplyPanel(true);
+      }
+      await waitForAssistantSettled(threadId);
+      if (state.activeId === threadId) {
+        skipCurrent('reply');
+      }
+      result = { ok: true };
+    } catch (err) {
+      replyState.status = 'error';
+      replyState.error = err instanceof Error ? err.message : 'Unable to send that reply.';
+      result = { ok: false, error: replyState.error };
+    } finally {
+      if (replyState.open) {
+        replyState.status = replyState.status === 'error' ? 'error' : 'idle';
+        renderReplyPanel();
+      }
     }
     return result;
   }
@@ -1356,7 +1695,7 @@
   function normalizeActionFlow(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const allowedStates = new Set(['suggested', 'draft_ready', 'editing', 'executing', 'completed', 'failed']);
-    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip', 'external_action']);
+    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip', 'external_action', 'reply']);
     const actionType = typeof raw.actionType === 'string' && allowedTypes.has(raw.actionType) ? raw.actionType : '';
     const state = typeof raw.state === 'string' && allowedStates.has(raw.state) ? raw.state : 'suggested';
     return actionType ? { ...raw, actionType, state } : null;
@@ -1383,13 +1722,13 @@
 
   function normalizeSuggestedAction(value) {
     const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip') return val;
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'reply') return val;
     return '';
   }
 
   function normalizeActionType(value) {
     const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'external_action') {
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'external_action' || val === 'reply') {
       return val;
     }
     return '';
@@ -1399,6 +1738,9 @@
     const next = normalizeSuggestedAction(actionFromNextStep(thread?.nextStep));
     if (next) return next;
     const summary = `${thread?.summary || thread?.headline || thread?.subject || ''}`.toLowerCase();
+    if (summary.includes('reply') || summary.includes('respond')) {
+      return 'reply';
+    }
     if (summary.includes('deadline') || summary.includes('follow up') || summary.includes('follow-up') || summary.includes('due')) {
       return 'create_task';
     }
@@ -1440,6 +1782,7 @@
     if (actionType === 'archive') return 'Archive';
     if (actionType === 'create_task') return 'Draft task';
     if (actionType === 'more_info') return 'Tell me more';
+    if (actionType === 'reply') return 'Reply';
     if (actionType === 'skip') return 'Skip';
     return 'Do it';
   }
@@ -1448,6 +1791,7 @@
     const text = typeof nextStep === 'string' ? nextStep.toLowerCase() : '';
     if (!text) return '';
     if (text.includes('archive')) return 'archive';
+    if (text.includes('reply') || text.includes('respond')) return 'reply';
     if (text.includes('remind') || text.includes('task') || text.includes('follow up') || text.includes('follow-up')) {
       return 'create_task';
     }
@@ -1809,8 +2153,10 @@
 
   function toggleComposer(enabled, options = {}) {
     const preserveTaskPanel = Boolean(options.preserveTaskPanel);
+    const preserveReplyPanel = Boolean(options.preserveReplyPanel);
     refs.chatInput.disabled = !enabled || !state.activeId;
     if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
+    if (refs.replyBtn) refs.replyBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
     if (refs.taskBtn) refs.taskBtn.disabled = !enabled || !state.activeId;
     if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
@@ -1818,6 +2164,9 @@
       clearComposerNudge();
       if (!preserveTaskPanel) {
         closeTaskPanel(true);
+      }
+      if (!preserveReplyPanel) {
+        closeReplyPanel(true);
       }
     }
   }
@@ -2087,6 +2436,7 @@
     updatePriorityPill();
     updateQueuePill();
     closeTaskPanel(true);
+    closeReplyPanel(true);
     clearPendingSuggestedAction(threadId);
 
     if (!state.needs.length) {
@@ -2166,6 +2516,7 @@
     updatePriorityPill();
     updateQueuePill();
     closeTaskPanel(true);
+    closeReplyPanel(true);
     clearPendingSuggestedAction(threadId);
     const nextId = getNextUnreviewedAfter(threadId, {
       order,
@@ -2305,6 +2656,11 @@
         await executeActionForThread(state.activeId, 'archive');
         return true;
       }
+      if (action === 'reply') {
+        clearPendingSuggestedAction(state.activeId);
+        openReplyPanelFromPrompt(userText);
+        return true;
+      }
       if (action === 'skip') {
         clearPendingSuggestedAction(state.activeId);
         await executeActionForThread(state.activeId, 'skip');
@@ -2342,6 +2698,11 @@
     if (intent === 'create_task') {
       clearPendingSuggestedAction(state.activeId);
       handleCreateTaskIntent();
+      return true;
+    }
+    if (intent === 'reply') {
+      clearPendingSuggestedAction(state.activeId);
+      openReplyPanelFromPrompt(userText);
       return true;
     }
 
@@ -2390,6 +2751,12 @@
       clearPendingCreate();
       closeTaskPanel(true);
       handleAutoIntent('skip', userText, { alreadyLogged: true });
+      return;
+    }
+    if (intent === 'reply') {
+      clearPendingCreate();
+      closeTaskPanel(true);
+      openReplyPanelFromPrompt(userText);
       return;
     }
 
@@ -2460,6 +2827,11 @@
       handleAutoIntent('skip', userText, { alreadyLogged: true });
       return;
     }
+    if (intent === 'reply') {
+      clearPendingArchive();
+      openReplyPanelFromPrompt(userText);
+      return;
+    }
 
     if (isAffirmativeResponse(normalized)) {
       clearPendingArchive();
@@ -2482,6 +2854,7 @@
       : 'All emails reviewed. Nice work.';
     const copy = message || fallback;
     closeTaskPanel(true);
+    closeReplyPanel(true);
     state.activeId = '';
     refs.emailEmpty.classList.remove('hidden');
     if (refs.position) {
@@ -2518,6 +2891,41 @@
     if (archivePhrases.includes(cleaned)) return 'archive';
     const skipPhrases = ['skip', 'skip it', 'skip this', 'skip this one', 'skip this email', 'skip this thread'];
     if (skipPhrases.includes(cleaned)) return 'skip';
+    const replyPhrases = [
+      'reply',
+      'reply back',
+      'reply to',
+      'respond',
+      'respond to',
+      'send a reply',
+      'send a response',
+      'draft a reply',
+      'write back',
+      'email back',
+      'answer them'
+    ];
+    if (replyPhrases.includes(cleaned)) return 'reply';
+    const replyStarters = [
+      'reply ',
+      'reply back ',
+      'respond ',
+      'send a reply ',
+      'send a response ',
+      'draft a reply ',
+      'write back ',
+      'email back ',
+      'tell them ',
+      'tell him ',
+      'tell her ',
+      'let them know ',
+      'let him know ',
+      'let her know ',
+      'say ',
+      'ask them ',
+      'ask him ',
+      'ask her '
+    ];
+    if (replyStarters.some(prefix => cleaned.startsWith(prefix))) return 'reply';
     const taskPhrases = [
       'create task',
       'create a task',
@@ -2531,7 +2939,7 @@
     ];
     if (taskPhrases.includes(cleaned) || cleaned.includes('reminder')) return 'create_task';
     const intent = await evaluateIntent(text);
-    return intent === 'archive' || intent === 'skip' || intent === 'create_task' ? intent : '';
+    return intent === 'archive' || intent === 'skip' || intent === 'create_task' || intent === 'reply' ? intent : '';
   }
 
   async function evaluateIntent(rawText) {

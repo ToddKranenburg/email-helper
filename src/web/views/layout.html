@@ -823,6 +823,11 @@
       color: #7a4b00;
       border: 1px solid #f1d7a7;
     }
+    .triage-btn.reply {
+      background: #e8f7ff;
+      color: #0b4f6c;
+      border: 1px solid #cfe8f7;
+    }
     .triage-btn.archive {
       background: #eef2ff;
       color: #27336a;
@@ -1028,6 +1033,112 @@
     .task-panel.loading input,
     .task-panel.loading textarea,
     .task-panel.loading button {
+      pointer-events: none;
+      opacity: 0.7;
+    }
+    .reply-panel {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-strong);
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: 0 12px 32px rgba(15,16,32,0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .reply-panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .reply-panel-label {
+      margin: 0;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .reply-panel-helper {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .reply-close {
+      border: none;
+      background: #f5f5fb;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #3b3a4f;
+    }
+    .reply-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .reply-field label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .reply-static {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 14px;
+      background: #fff;
+      color: #1f2937;
+    }
+    .reply-field textarea {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 15px;
+      background: #fff;
+      min-height: 110px;
+      resize: vertical;
+    }
+    .reply-error {
+      margin: 0;
+      color: #d64545;
+      font-weight: 600;
+    }
+    .reply-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .reply-submit {
+      background: var(--text);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .reply-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .reply-cancel {
+      border: 1px solid var(--border);
+      background: #f7f7fb;
+      color: #3b3a4f;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .reply-cancel:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .reply-panel.loading textarea,
+    .reply-panel.loading button {
       pointer-events: none;
       opacity: 0.7;
     }

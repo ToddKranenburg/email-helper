@@ -69,6 +69,10 @@
                 <span class="action-icon" aria-hidden="true">👀</span>
                 <span>More info</span>
               </button>
+              <button class="triage-btn reply" id="action-reply" type="button">
+                <span class="action-icon" aria-hidden="true">✉️</span>
+                <span>Reply</span>
+              </button>
               <button class="triage-btn archive" id="action-archive" type="button">
                 <span class="action-icon" aria-hidden="true">🗄️</span>
                 <span>Archive</span>
@@ -116,6 +120,32 @@
                   <button class="task-cancel" id="task-cancel" type="button">Cancel</button>
                   <button class="task-submit" id="task-submit" type="button">Create task</button>
                 </div>
+              </div>
+            </section>
+            <section class="reply-panel hidden" id="reply-panel" aria-live="polite">
+              <div class="reply-panel-head">
+                <div>
+                  <p class="reply-panel-label">✉️ Reply to sender</p>
+                  <p class="reply-panel-helper" id="reply-panel-helper">Send a quick response without leaving the queue.</p>
+                </div>
+                <button class="reply-close" id="reply-close" type="button" aria-label="Close reply panel">✕</button>
+              </div>
+              <div class="reply-field">
+                <label>To</label>
+                <div class="reply-static" id="reply-to"></div>
+              </div>
+              <div class="reply-field">
+                <label>Subject</label>
+                <div class="reply-static" id="reply-subject"></div>
+              </div>
+              <div class="reply-field">
+                <label for="reply-body">Message</label>
+                <textarea id="reply-body" rows="5" placeholder="Type your reply…"></textarea>
+              </div>
+              <p class="reply-error hidden" id="reply-error" role="alert"></p>
+              <div class="reply-actions">
+                <button class="reply-cancel" id="reply-cancel" type="button">Cancel</button>
+                <button class="reply-submit" id="reply-submit" type="button">Send reply</button>
               </div>
             </section>
             <form id="assistant-form" class="assistant-input">

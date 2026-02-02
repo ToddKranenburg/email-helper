@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import type { Summary, Thread, ActionFlow } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
+import { generateReplyDraft } from '../llm/replyDraft.js';
 import {
   ensureAutoSummaryCards,
   fetchTimeline,
@@ -32,6 +33,7 @@ const PRIORITY_LIMIT = 6;
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
+const REPLY_DRAFT_MIN_CONFIDENCE = 0.75;
 
 router.use(async (req, _res, next) => {
   const sessionData = req.session as any;
@@ -330,6 +332,43 @@ router.post('/secretary/review', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/secretary/reply-draft', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  if (ensureScopesForApi(sessionData, res)) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
+
+  try {
+    const draft = await generateReplyDraft({
+      subject: context.summary.Thread?.subject || '',
+      headline: context.summary.headline,
+      summary: context.summary.tldr,
+      nextStep: context.summary.nextStep,
+      participants: context.participants,
+      transcript: context.transcript,
+      fromLine: formatSender(context.summary.Thread)
+    });
+    const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
+    return res.json({
+      body: eligible ? draft.body : '',
+      confidence: draft.confidence,
+      safe: draft.safeToDraft,
+      suggested: eligible,
+      reason: draft.reason
+    });
+  } catch (err) {
+    console.error('reply draft failed', err);
+    return res.status(500).json({ error: 'Unable to draft a reply right now.' });
+  }
+});
+
 router.post('/secretary/archive-intent', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) {
@@ -509,6 +548,86 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       await appendActionResult(sessionData.user.id, threadId, reply);
       const timeline = await fetchTimeline(sessionData.user.id, threadId);
       return res.json({ status: 'ok', flow, timeline });
+    }
+
+    if (actionType === 'reply') {
+      const body = normalizeReplyBody(req.body?.draft?.body ?? req.body?.body);
+      if (!body) {
+        return res.status(400).json({ error: 'Write a reply before sending.' });
+      }
+
+      const auth = getAuthedClient(sessionData);
+      const gmail = gmailClient(auth);
+      const replyMeta = await fetchReplyMetadata(gmail, context.summary.lastMsgId);
+      const replyTarget = selectReplyTarget(replyMeta, context.summary.Thread, context.participants, sessionData.user.email);
+      if (!replyTarget.to) {
+        return res.status(400).json({ error: 'Unable to identify a sender to reply to.' });
+      }
+      const normalizedUser = normalizeEmail(sessionData.user.email);
+      if (replyTarget.email && normalizedUser && replyTarget.email.toLowerCase() === normalizedUser) {
+        return res.status(400).json({ error: 'Unable to find a sender to reply to in this thread.' });
+      }
+      const subject = buildReplySubject(replyMeta.subject || context.summary.Thread?.subject || '');
+      const references = mergeReferences(replyMeta.references, replyMeta.messageId);
+      const raw = buildReplyMessage({
+        to: replyTarget.to,
+        subject,
+        body,
+        inReplyTo: replyMeta.messageId,
+        references
+      });
+
+      const executingFlow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'executing',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'executing',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+
+      try {
+        await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: {
+            raw,
+            threadId
+          }
+        });
+        const completedFlow = await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'completed' }
+        });
+        const recipientLabel = replyTarget.label || replyTarget.to;
+        await appendActionResult(
+          sessionData.user.id,
+          threadId,
+          `✅ Reply sent to ${recipientLabel || 'the sender'}.`
+        );
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.json({ status: 'sent', flow: completedFlow, timeline });
+      } catch (err) {
+        if (handleMissingScopeError(err, sessionData, res)) return;
+        if (handleInsufficientScopeFromGaxios(err, sessionData, res)) return;
+        await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'failed' }
+        });
+        console.error('Failed to send reply', err);
+        const message = err instanceof Error ? err.message : 'Unable to send that reply.';
+        await appendActionResult(sessionData.user.id, threadId, `Reply failed: ${message}`);
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.status(500).json({ error: 'Unable to send that reply right now.', timeline });
+      }
     }
 
     if (actionType === 'create_task') {
@@ -949,7 +1068,7 @@ function parseParticipants(raw?: string | null): string[] {
 
 function normalizeActionTypeInput(raw: unknown): ActionType | null {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip') {
+  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip' || value === 'reply') {
     return value as ActionType;
   }
   return null;
@@ -968,6 +1087,155 @@ function normalizeDraftInput(raw: any): { title: string; notes: string; dueDate:
     notes,
     dueDate: due || null
   };
+}
+
+function normalizeReplyBody(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\r\n/g, '\n').trim();
+}
+
+async function fetchReplyMetadata(gmail: ReturnType<typeof gmailClient>, messageId: string) {
+  if (!messageId) {
+    return { subject: '', replyTo: '', from: '', messageId: '', references: '' };
+  }
+  const message = await gmail.users.messages.get({
+    userId: 'me',
+    id: messageId,
+    format: 'metadata',
+    metadataHeaders: ['Subject', 'From', 'Reply-To', 'Message-ID', 'References']
+  });
+  const headers = message.data.payload?.headers || [];
+  return {
+    subject: findHeader(headers, 'Subject'),
+    replyTo: findHeader(headers, 'Reply-To'),
+    from: findHeader(headers, 'From'),
+    messageId: findHeader(headers, 'Message-ID'),
+    references: findHeader(headers, 'References')
+  };
+}
+
+function findHeader(headers: Array<{ name?: string | null; value?: string | null }>, name: string) {
+  const target = name.toLowerCase();
+  const header = headers.find(item => (item?.name || '').toLowerCase() === target);
+  return header?.value || '';
+}
+
+function selectReplyTarget(
+  meta: { replyTo?: string; from?: string },
+  thread?: { fromEmail?: string | null; fromName?: string | null } | null,
+  participants: string[] = [],
+  userEmail?: string | null
+) {
+  const parsed = parseAddress(meta.replyTo || meta.from || '');
+  let email = parsed.email;
+  let name = parsed.name;
+  const fallbackEmail = thread?.fromEmail ? String(thread.fromEmail).trim() : '';
+  const fallbackName = thread?.fromName ? String(thread.fromName).trim() : '';
+  if (!email && fallbackEmail) {
+    email = fallbackEmail;
+    name = name || fallbackName;
+  }
+  const normalizedUser = normalizeEmail(userEmail);
+  if (email && normalizedUser && email.toLowerCase() === normalizedUser) {
+    const alternate = selectParticipantRecipient(participants, normalizedUser);
+    if (alternate?.email) {
+      email = alternate.email;
+      name = alternate.name;
+    }
+  }
+  const to = email ? formatAddress(name, email) : '';
+  const label = name || email;
+  return { to, label, email };
+}
+
+function parseAddress(raw: string) {
+  const value = String(raw || '').trim();
+  if (!value) return { email: '', name: '' };
+  const angleMatch = value.match(/<([^>]+)>/);
+  if (angleMatch) {
+    const email = angleMatch[1].trim();
+    const name = value.replace(angleMatch[0], '').trim().replace(/^"|"$/g, '');
+    return { email, name };
+  }
+  const emailMatch = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (emailMatch) {
+    const email = emailMatch[0].trim();
+    const name = value.replace(emailMatch[0], '').trim().replace(/^"|"$/g, '');
+    return { email, name };
+  }
+  return { email: '', name: value.replace(/^"|"$/g, '') };
+}
+
+function selectParticipantRecipient(participants: string[], userEmail: string) {
+  if (!Array.isArray(participants)) return null;
+  for (const participant of participants) {
+    const parsed = parseAddress(participant);
+    if (parsed.email && parsed.email.toLowerCase() !== userEmail) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function normalizeEmail(raw?: string | null) {
+  return raw ? String(raw).trim().toLowerCase() : '';
+}
+
+function formatAddress(name: string, email: string) {
+  const safeEmail = sanitizeHeaderValue(email);
+  const safeName = sanitizeHeaderValue(name);
+  return safeName ? `${safeName} <${safeEmail}>` : safeEmail;
+}
+
+function buildReplySubject(subject: string) {
+  const clean = sanitizeHeaderValue(subject);
+  if (!clean) return 'Re:';
+  if (/^re:/i.test(clean)) return clean;
+  return `Re: ${clean}`;
+}
+
+function mergeReferences(references: string, messageId: string) {
+  const ref = sanitizeHeaderValue(references);
+  const msg = sanitizeHeaderValue(messageId);
+  if (!msg) return ref;
+  if (!ref) return msg;
+  if (ref.includes(msg)) return ref;
+  return `${ref} ${msg}`;
+}
+
+function buildReplyMessage(input: {
+  to: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string;
+  references?: string;
+}) {
+  const headers = [
+    `To: ${sanitizeHeaderValue(input.to)}`,
+    `Subject: ${sanitizeHeaderValue(input.subject)}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit'
+  ];
+  const inReplyTo = sanitizeHeaderValue(input.inReplyTo || '');
+  if (inReplyTo) headers.splice(2, 0, `In-Reply-To: ${inReplyTo}`);
+  const references = sanitizeHeaderValue(input.references || '');
+  if (references) headers.splice(3, 0, `References: ${references}`);
+  const body = normalizeReplyBody(input.body).replace(/\n/g, '\r\n');
+  const raw = `${headers.join('\r\n')}\r\n\r\n${body}`;
+  return encodeBase64Url(raw);
+}
+
+function encodeBase64Url(value: string) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function sanitizeHeaderValue(value: string) {
+  return String(value || '').replace(/[\r\n]+/g, ' ').trim();
 }
 
 function selectDraftPayload(

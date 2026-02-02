@@ -24,14 +24,15 @@ const openai = process.env.OPENAI_API_KEY
 
 const AUTO_SUMMARY_PROMPT = `You summarize email threads for a busy professional and propose ONE next action.
 Output STRICT JSON:
-{"must_know":"<plain text essentials only>","action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|EXTERNAL_ACTION|NONE","suggested_action":{"userFacingPrompt":"<concise action prompt>"},"external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}
+{"must_know":"<plain text essentials only>","action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|REPLY|EXTERNAL_ACTION|NONE","suggested_action":{"userFacingPrompt":"<concise action prompt>"},"external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}
 Rules:
 - "must_know": concise, essential content only (no actions, no emojis, no markdown).
 - "action_type": choose ONE. Prefer ARCHIVE when no action is needed. Use NONE only for truly ignorable content.
-- "suggested_action.userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
+- "suggested_action.userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO/REPLY. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
 - "external_action": only include when action_type is EXTERNAL_ACTION.
 - EXTERNAL_ACTION is for meaningful user actions outside the app (security alerts, verification, compliance, account lock risk, past-due notices, required RSVP/forms). Marketing/promotional CTAs like “buy now”, “upgrade”, “shop” must NOT trigger EXTERNAL_ACTION.
 - CREATE_TASK is only for reminders when the email cannot be resolved immediately and the user should handle it later (future follow-ups, deadlines, planned check-ins). If there is a direct link to take action now (review budget, verify account, RSVP, submit form), prefer EXTERNAL_ACTION.
+- REPLY is for straightforward responses the user can handle by email without external steps.
 - "external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
 - "external_action.links": 1-3 items. Prefer explicit account/security/action URLs from the email. Avoid generic homepage links.
 - If action_type is NONE, omit suggested_action and external_action.`;
@@ -210,7 +211,7 @@ function normalizeText(value: unknown) {
 function normalizeActionType(value: unknown): ActionType | null {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (text === 'none') return 'archive';
-  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip' || text === 'external_action') {
+  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip' || text === 'external_action' || text === 'reply') {
     return text as ActionType;
   }
   return null;
@@ -243,6 +244,7 @@ function actionPrompt(action: ActionType) {
   if (action === 'create_task') return 'Draft a quick task so this stays on your radar?';
   if (action === 'more_info') return 'Want me to pull more context or clarifications?';
   if (action === 'external_action') return 'This needs your attention outside the app. Want the key links?';
+  if (action === 'reply') return 'Draft a reply to the sender so you can respond quickly?';
   return 'Skip for now and move to the next email?';
 }
 

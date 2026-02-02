@@ -11,7 +11,7 @@ export type ArchiveIntentDecision = {
   source: 'model' | 'heuristic';
 };
 
-export type SecretaryIntent = 'archive' | 'skip' | 'create_task' | 'none';
+export type SecretaryIntent = 'archive' | 'skip' | 'create_task' | 'reply' | 'none';
 
 export type SecretaryIntentDecision = {
   intent: SecretaryIntent;
@@ -24,8 +24,9 @@ const INTENT_PROMPT = `Classify the user's ask for an email assistant.
 - "archive": They want the thread cleared from the inbox / archived.
 - "skip": They want to skip handling this thread for now (do not archive).
 - "create_task": They want to create a task/reminder/todo based on this email (treat "reminder" or "remind me" the same as create_task).
+- "reply": They want to reply or send a response to the sender.
 - "none": Anything else (questions, drafts, summaries, etc.).
-Return JSON: {"intent":"archive|skip|create_task|none","confidence":0-1,"reason":"short phrase"}. Keep it concise.`;
+Return JSON: {"intent":"archive|skip|create_task|reply|none","confidence":0-1,"reason":"short phrase"}. Keep it concise.`;
 
 export async function detectArchiveIntent(userText: string): Promise<ArchiveIntentDecision> {
   const decision = await classifyIntent(userText);
@@ -45,11 +46,14 @@ export async function classifyIntent(userText: string): Promise<SecretaryIntentD
 
   const archiveGuess = heuristicArchive(text);
   const taskGuess = heuristicTask(text);
-  const skipGuess = heuristicSkip(text, taskGuess);
+  const replyGuess = heuristicReply(text);
+  const skipGuess = heuristicSkip(text, taskGuess, replyGuess);
   const fallbackIntent: SecretaryIntent = archiveGuess
     ? 'archive'
     : taskGuess
       ? 'create_task'
+      : replyGuess
+        ? 'reply'
       : skipGuess
         ? 'skip'
         : 'none';
@@ -116,7 +120,7 @@ function parseIntentDecision(payload: string): SecretaryIntentDecision | null {
 
 function normalizeIntent(value: unknown): SecretaryIntent | null {
   const val = typeof value === 'string' ? value.toLowerCase().trim() : '';
-  if (val === 'archive' || val === 'skip' || val === 'create_task' || val === 'none') return val;
+  if (val === 'archive' || val === 'skip' || val === 'create_task' || val === 'reply' || val === 'none') return val;
   return null;
 }
 
@@ -158,10 +162,13 @@ function heuristicArchive(text: string): boolean {
   return keywords.some(phrase => cleaned.includes(phrase));
 }
 
-function heuristicSkip(text: string, taskDetected: boolean): boolean {
+function heuristicSkip(text: string, taskDetected: boolean, replyDetected: boolean): boolean {
   const cleaned = text.replace(/[.!?]/g, ' ').toLowerCase().trim();
   if (!cleaned) return false;
   if (taskDetected && /\b(remind|reminder|task|todo|to do)\b/.test(cleaned)) {
+    return false;
+  }
+  if (replyDetected && /\b(reply|respond|response)\b/.test(cleaned)) {
     return false;
   }
   const skipPhrases = [
@@ -189,6 +196,25 @@ function heuristicSkip(text: string, taskDetected: boolean): boolean {
     'leave this for now'
   ];
   return skipPhrases.some(phrase => cleaned.includes(phrase));
+}
+
+function heuristicReply(text: string): boolean {
+  const cleaned = text.replace(/[.!?]/g, ' ').toLowerCase().trim();
+  if (!cleaned) return false;
+  const replyPhrases = [
+    'reply',
+    'reply back',
+    'reply to',
+    'respond',
+    'respond to',
+    'send a reply',
+    'send a response',
+    'draft a reply',
+    'write back',
+    'email back',
+    'answer them'
+  ];
+  return replyPhrases.some(phrase => cleaned.includes(phrase));
 }
 
 function heuristicTask(text: string): boolean {
