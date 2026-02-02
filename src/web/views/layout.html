@@ -1227,6 +1227,24 @@
     .priority-subtext {
       color: rgba(138,90,0,0.7);
     }
+    .priority-progress {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: rgba(138,90,0,0.6);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .priority-progress .priority-mini-spinner {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      border: 2px solid rgba(138,90,0,0.25);
+      border-top-color: rgba(138,90,0,0.7);
+      animation: spin 0.9s linear infinite;
+      flex: 0 0 auto;
+    }
     .priority-list {
       flex: 1 1 auto;
       min-height: 0;

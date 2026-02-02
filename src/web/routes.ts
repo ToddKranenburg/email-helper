@@ -200,10 +200,14 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const threads = await buildThreadsPayload(userId, pageData.items);
   const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
-  const latestPriorityBatch = await prisma.prioritizationBatch.findFirst({
-    where: { userId, status: 'completed', finishedAt: { not: null } },
-    orderBy: { finishedAt: 'desc' }
-  });
+  const [prioritizedCount, totalCount, latestCompletedBatch] = await Promise.all([
+    prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true, priorityScore: { not: null } } }),
+    prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } }),
+    prisma.prioritizationBatch.findFirst({
+      where: { userId, status: 'completed', finishedAt: { not: null } },
+      orderBy: { finishedAt: 'desc' }
+    })
+  ]);
   const priorityThreads = priorityQueue.items.length
     ? await buildThreadsPayload(userId, priorityQueue.items)
     : [];
@@ -218,7 +222,13 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     hasMore: pageData.hasMore,
     nextPage: pageData.nextPage
   };
-  const withFlag = `${render(body, mergedThreads, pageMeta, priorityQueue.priority, latestPriorityBatch?.finishedAt ?? null)}
+  const withFlag = `${render(
+    body,
+    mergedThreads,
+    pageMeta,
+    priorityQueue.priority,
+    { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null }
+  )}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -852,15 +862,20 @@ router.get('/api/priority', async (req: Request, res: Response) => {
     const priorityThreads = priorityQueue.items.length
       ? await buildThreadsPayload(userId, priorityQueue.items)
       : [];
-    const latestPriorityBatch = await prisma.prioritizationBatch.findFirst({
-      where: { userId, status: 'completed', finishedAt: { not: null } },
-      orderBy: { finishedAt: 'desc' }
-    });
+    const [prioritizedCount, totalCount, latestCompletedBatch] = await Promise.all([
+      prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true, priorityScore: { not: null } } }),
+      prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } }),
+      prisma.prioritizationBatch.findFirst({
+        where: { userId, status: 'completed', finishedAt: { not: null } },
+        orderBy: { finishedAt: 'desc' }
+      })
+    ]);
     return res.json({
       priority: priorityQueue.priority,
       threads: priorityThreads,
-      batchFinishedAt: latestPriorityBatch?.finishedAt
-        ? latestPriorityBatch.finishedAt.toISOString()
+      progress: { prioritizedCount, totalCount },
+      batchFinishedAt: latestCompletedBatch?.finishedAt
+        ? latestCompletedBatch.finishedAt.toISOString()
         : null
     });
   } catch (err) {
@@ -1072,9 +1087,9 @@ function render(
   items: SecretaryThread[],
   meta: PageMeta,
   priority: PriorityEntry[],
-  priorityBatchFinishedAt: Date | null
+  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null }
 ) {
-  const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityBatchFinishedAt);
+  const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityProgress);
   return `${tpl}\n${secretaryScript}`;
 }
 
@@ -1082,12 +1097,18 @@ function renderSecretaryAssistant(
   items: SecretaryThread[],
   meta: PageMeta,
   priority: PriorityEntry[],
-  priorityBatchFinishedAt: Date | null
+  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null }
 ) {
   const payload = safeJson({
     threads: items,
     priority,
-    priorityBatchFinishedAt: priorityBatchFinishedAt ? priorityBatchFinishedAt.toISOString() : null,
+    priorityProgress: {
+      prioritizedCount: priorityProgress.prioritizedCount,
+      totalCount: priorityProgress.totalCount
+    },
+    priorityBatchFinishedAt: priorityProgress.batchFinishedAt
+      ? priorityProgress.batchFinishedAt.toISOString()
+      : null,
     maxTurns: MAX_CHAT_TURNS,
     totalItems: meta.totalItems,
     pageSize: meta.pageSize,

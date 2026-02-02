@@ -2,6 +2,9 @@
   const bootstrap = window.SECRETARY_BOOTSTRAP || {};
   const threads = Array.isArray(bootstrap.threads) ? bootstrap.threads : [];
   const priorityPayload = Array.isArray(bootstrap.priority) ? bootstrap.priority : null;
+  const priorityProgress = bootstrap.priorityProgress && typeof bootstrap.priorityProgress === 'object'
+    ? bootstrap.priorityProgress
+    : null;
   const priorityBatchFinishedAt = typeof bootstrap.priorityBatchFinishedAt === 'string'
     ? bootstrap.priorityBatchFinishedAt
     : null;
@@ -45,6 +48,17 @@
     if (!value) return 0;
     const ts = Date.parse(value);
     return Number.isFinite(ts) ? ts : 0;
+  }
+
+  function normalizePriorityProgress(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const prioritizedCount = Number(raw.prioritizedCount);
+    const totalCount = Number(raw.totalCount);
+    if (!Number.isFinite(prioritizedCount) || !Number.isFinite(totalCount)) return null;
+    return {
+      prioritizedCount: Math.max(0, prioritizedCount),
+      totalCount: Math.max(0, totalCount)
+    };
   }
 
   function readPrioritySyncStart() {
@@ -103,6 +117,7 @@
     taskReset: document.getElementById('task-reset'),
     taskClose: document.getElementById('task-close'),
     priorityList: document.getElementById('priority-list'),
+    priorityProgress: document.getElementById('priority-progress'),
     replyPanel: document.getElementById('reply-panel'),
     replyPanelHelper: document.getElementById('reply-panel-helper'),
     replyTo: document.getElementById('reply-to'),
@@ -136,6 +151,7 @@
     priorityLoading: false,
     prioritySyncStartAt: 0,
     priorityLastBatchAt: parseTimestamp(priorityBatchFinishedAt),
+    priorityProgress: normalizePriorityProgress(priorityProgress),
     priorityPolling: false,
     priorityPollTimer: 0,
     histories: new Map(),
@@ -233,6 +249,7 @@
     updateHeaderCount();
     updateProgress();
     updatePriorityPill();
+    updatePriorityProgress();
     updateQueuePill();
     updateDrawerLists();
     updateLoadMoreButtons();
@@ -1497,6 +1514,28 @@
     refs.priorityPill.textContent = state.needs.length ? 'All clear' : 'No priority mail';
   }
 
+  function updatePriorityProgress() {
+    if (!refs.priorityProgress) return;
+    const progress = state.priorityProgress;
+    if (!progress || !progress.totalCount) {
+      refs.priorityProgress.textContent = '';
+      return;
+    }
+    const prioritized = Math.min(progress.prioritizedCount, progress.totalCount);
+    if (prioritized >= progress.totalCount) {
+      if (state.priorityLoading) {
+        setPriorityLoading(false);
+      }
+      if (state.prioritySyncStartAt) {
+        state.prioritySyncStartAt = 0;
+        clearPrioritySyncStart();
+      }
+    }
+    const needsSpinner = prioritized < progress.totalCount;
+    const spinner = needsSpinner ? '<span class="priority-mini-spinner" aria-hidden="true"></span>' : '';
+    refs.priorityProgress.innerHTML = `${spinner}<span>Prioritized ${prioritized} of ${progress.totalCount}</span>`;
+  }
+
   function updateLoadMoreButtons() {
     if (refs.loadMoreHead) {
       refs.loadMoreHead.classList.remove('hidden');
@@ -1594,22 +1633,35 @@
       const shouldApply = hasNewBatch ||
         (state.priorityLoading && batchAt && state.prioritySyncStartAt && batchAt >= state.prioritySyncStartAt);
 
-      if (shouldApply) {
-        if (hasNewBatch) {
-          setPriorityLoading(true);
+    if (shouldApply) {
+      if (hasNewBatch) {
+        setPriorityLoading(true);
+      }
+      window.setTimeout(() => {
+        applyPriorityPayload(data);
+        if (batchAt) {
+          state.priorityLastBatchAt = batchAt;
         }
-        window.setTimeout(() => {
-          applyPriorityPayload(data);
-          if (batchAt) {
-            state.priorityLastBatchAt = batchAt;
-          }
-          if (state.prioritySyncStartAt && batchAt && batchAt >= state.prioritySyncStartAt) {
+        if (state.prioritySyncStartAt && batchAt && batchAt >= state.prioritySyncStartAt) {
+          state.prioritySyncStartAt = 0;
+          clearPrioritySyncStart();
+        }
+        setPriorityLoading(false);
+      }, hasNewBatch ? PRIORITY_LOADING_MIN_MS : 0);
+    } else if (data?.progress) {
+      const progress = normalizePriorityProgress(data.progress);
+      if (progress) {
+        state.priorityProgress = progress;
+        updatePriorityProgress();
+        if (progress.prioritizedCount >= progress.totalCount) {
+          setPriorityLoading(false);
+          if (state.prioritySyncStartAt) {
             state.prioritySyncStartAt = 0;
             clearPrioritySyncStart();
           }
-          setPriorityLoading(false);
-        }, hasNewBatch ? PRIORITY_LOADING_MIN_MS : 0);
+        }
       }
+    }
     } catch (err) {
       logDebug('priority poll failed', err);
     } finally {
@@ -1639,9 +1691,15 @@
       appendThreads(incoming);
     }
 
+    const progress = normalizePriorityProgress(payload?.progress);
+    if (progress) {
+      state.priorityProgress = progress;
+    }
+
     updateHeaderCount();
     updateProgress();
     updatePriorityPill();
+    updatePriorityProgress();
     updateQueuePill();
     updateDrawerLists();
   }
