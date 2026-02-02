@@ -14,11 +14,11 @@ type SummaryRecord = {
   nextStep: string | null;
   createdAt: Date;
   threadId: string;
-  Thread?: {
+  threadIndex?: {
     subject?: string | null;
     fromName?: string | null;
     fromEmail?: string | null;
-    lastMessageTs?: Date | null;
+    lastMessageDate?: Date | null;
   } | null;
 };
 
@@ -93,7 +93,7 @@ function fallbackBrief(summaries: SummaryRecord[]): InboxBrief {
 
   const actionable = summaries.filter(hasAction);
   const topHighlights = actionable.map(summary => {
-    const subject = sanitizeText(summary.headline || summary.Thread?.subject || 'Inbox item');
+    const subject = sanitizeText(summary.headline || summary.threadIndex?.subject || 'Inbox item');
     const next = sanitizeText(summary.nextStep || 'Follow up');
     return `${subject}: ${next}`;
   });
@@ -113,12 +113,12 @@ function fallbackBrief(summaries: SummaryRecord[]): InboxBrief {
 
 function summarizeEntries(summaries: SummaryRecord[]) {
   return summaries.map((summary, index) => {
-    const subject = sanitizeText(summary.Thread?.subject || summary.headline || '');
+    const subject = sanitizeText(summary.threadIndex?.subject || summary.headline || '');
     const tldr = sanitizeText(summary.tldr);
     const next = sanitizeText(summary.nextStep || 'No action');
     const category = titleCaseCategory(summary.category || 'FYI');
-    const from = sanitizeText(summary.Thread?.fromName || summary.Thread?.fromEmail || '');
-    const when = summary.Thread?.lastMessageTs || summary.createdAt;
+    const from = sanitizeText(summary.threadIndex?.fromName || summary.threadIndex?.fromEmail || '');
+    const when = summary.threadIndex?.lastMessageDate || summary.createdAt;
     return `${index + 1}. Subject: ${subject} | Category: ${category} | From: ${from || 'Unknown'} | TLDR: ${tldr} | Next: ${next} | Last Activity: ${when.toISOString()}`;
   }).join('\n');
 }
@@ -237,9 +237,9 @@ function findBestSummaryForHighlight(
 
   for (const summary of summaries) {
     if (used.has(summary.threadId)) continue;
-    const subject = sanitizeText(summary.Thread?.subject || summary.headline || '');
+    const subject = sanitizeText(summary.threadIndex?.subject || summary.headline || '');
     const next = sanitizeText(summary.nextStep || '');
-    const from = sanitizeText(summary.Thread?.fromName || summary.Thread?.fromEmail || '');
+    const from = sanitizeText(summary.threadIndex?.fromName || summary.threadIndex?.fromEmail || '');
     const category = titleCaseCategory(summary.category || '');
     let score = 0;
 

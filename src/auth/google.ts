@@ -119,6 +119,7 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
   if (!email) {
     return res.status(400).send('Unable to retrieve Gmail profile information.');
   }
+  const historyCursor = gmailProfile.historyId ?? null;
 
   let profileName: string | null = null;
   let profilePicture: string | null = null;
@@ -152,6 +153,20 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
   });
 
   await upsertGoogleToken(userId, tokens);
+  const storedToken = await prisma.googleToken.findUnique({
+    where: { userId },
+    select: { refreshToken: true }
+  });
+  if (!storedToken?.refreshToken) {
+    return res
+      .status(403)
+      .send('Google did not return a refresh token. Please try reconnecting again from the app. If it still fails, remove the app from your Google Account permissions and retry.');
+  }
+  await prisma.gmailAccount.upsert({
+    where: { userId },
+    update: { emailAddress: email, historyCursor },
+    create: { userId, emailAddress: email, historyCursor }
+  });
 
   (req.session as any).googleTokens = tokens;
   (req.session as any).user = userPayload;

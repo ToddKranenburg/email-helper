@@ -15,7 +15,8 @@
     "start": "node dist/server.js",
     "batch:sync": "node dist/jobs/batchSync.js",
     "batch:sync:dev": "tsx src/jobs/batchSync.ts",
-    "prisma:gen": "prisma generate"
+    "prisma:gen": "prisma generate",
+    "test:sync": "tsx src/tests/sync.test.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",

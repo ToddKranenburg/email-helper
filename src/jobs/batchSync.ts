@@ -8,8 +8,8 @@ const ACTIVE_WINDOW_DAYS = Number(process.env.BATCH_SYNC_ACTIVE_DAYS ?? 30);
 const MIN_INTERVAL_MINUTES = Number(process.env.BATCH_SYNC_MIN_INTERVAL_MINUTES ?? 30);
 const MAX_USERS = Number(process.env.BATCH_SYNC_MAX_USERS ?? 200);
 const CONCURRENCY = Number(process.env.BATCH_SYNC_CONCURRENCY ?? 3);
-const MAX_PAGES = Number(process.env.BATCH_SYNC_MAX_PAGES ?? 2);
-const MIN_NEW = Number(process.env.BATCH_SYNC_MIN_NEW ?? 20);
+const INITIAL_SYNC_DAYS = Number(process.env.INITIAL_SYNC_DAYS ?? 30);
+const INITIAL_SYNC_MAX_THREADS = Number(process.env.INITIAL_SYNC_MAX_THREADS ?? 1000);
 
 type SyncUser = {
   id: string;
@@ -33,8 +33,8 @@ async function runBatchSync() {
     minIntervalMinutes: MIN_INTERVAL_MINUTES,
     maxUsers: MAX_USERS,
     concurrency: CONCURRENCY,
-    maxPages: MAX_PAGES,
-    minNew: MIN_NEW
+    initialDays: INITIAL_SYNC_DAYS,
+    initialMaxThreads: INITIAL_SYNC_MAX_THREADS
   });
 
   const users = await prisma.user.findMany({
@@ -96,9 +96,15 @@ async function syncUser(user: SyncUser): Promise<'ok' | 'skipped' | 'error'> {
       tokenType: token.tokenType,
       expiryDate: token.expiryDate
     });
-    const result = await ingestInboxWithClient(auth, user.id, { maxPages: MAX_PAGES, minNew: MIN_NEW, prune: true });
+    const result = await ingestInboxWithClient(auth, user.id);
     await markSyncResult(user.id, 'ok', null);
-    console.log('[batch-sync] synced', { userId: user.id, created: result.created, hasMore: result.hasMore });
+    console.log('[batch-sync] synced', {
+      userId: user.id,
+      mode: result.mode,
+      fetched: result.fetched,
+      updated: result.updated,
+      removed: result.removed
+    });
     return 'ok';
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

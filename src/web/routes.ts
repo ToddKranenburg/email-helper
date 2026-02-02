@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
+import { ensureThreadSummary } from '../gmail/summary.js';
 import { loadPriorityQueue, type PriorityEntry } from '../actions/priorityQueue.js';
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
@@ -11,7 +12,7 @@ import { normalizeBody } from '../gmail/normalize.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
-import type { Summary, Thread, ActionFlow } from '@prisma/client';
+import type { Summary, ThreadIndex, ActionFlow } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
 import { generateGuidedReplyDraft, generateReplyDraft } from '../llm/replyDraft.js';
@@ -60,6 +61,19 @@ function ensureScopesForPage(sessionData: any, res: Response) {
   return true;
 }
 
+async function ensureRefreshTokenForPage(sessionData: any, res: Response) {
+  const userId = sessionData?.user?.id;
+  if (!userId) return false;
+  const token = await prisma.googleToken.findUnique({
+    where: { userId },
+    select: { refreshToken: true }
+  });
+  if (token?.refreshToken) return false;
+  clearGoogleSession(sessionData);
+  res.redirect('/auth/google?upgrade=1&reason=missing_refresh');
+  return true;
+}
+
 function ensureScopesForApi(sessionData: any, res: Response) {
   const missingScopes = getMissingGmailScopes(sessionData?.googleTokens);
   if (!missingScopes.length) return false;
@@ -68,6 +82,22 @@ function ensureScopesForApi(sessionData: any, res: Response) {
     error: 'Google permissions changed. Please reconnect your Google account to continue.',
     missingScopes,
     reconnectUrl: '/auth/google'
+  });
+  return true;
+}
+
+async function ensureRefreshTokenForApi(sessionData: any, res: Response) {
+  const userId = sessionData?.user?.id;
+  if (!userId) return false;
+  const token = await prisma.googleToken.findUnique({
+    where: { userId },
+    select: { refreshToken: true }
+  });
+  if (token?.refreshToken) return false;
+  clearGoogleSession(sessionData);
+  res.status(403).json({
+    error: 'Google needs a refresh token to keep syncing in the background. Please reconnect your Google account.',
+    reconnectUrl: '/auth/google?upgrade=1&reason=missing_refresh'
   });
   return true;
 }
@@ -120,8 +150,9 @@ type PageMeta = {
   nextPage: number | null;
 };
 
-type SummaryWithThread = Summary & { Thread: Thread | null };
-type ThreadContext = { summary: SummaryWithThread; transcript: string; participants: string[] };
+type SummaryWithThreadIndex = Summary & { threadIndex: ThreadIndex | null };
+type ThreadListItem = { thread: ThreadIndex; summary: Summary | null };
+type ThreadContext = { summary: SummaryWithThreadIndex; transcript: string; participants: string[] };
 type SecretaryThread = {
   threadId: string;
   messageId: string;
@@ -143,6 +174,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
   if (ensureScopesForPage(sessionData, res)) return;
+  if (await ensureRefreshTokenForPage(sessionData, res)) return;
   const userId = sessionData.user.id;
   const traceId = createTraceId();
   const log = scopedLogger(`dashboard:${traceId}`);
@@ -197,6 +229,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
     return res.status(401).send('auth first');
   }
   if (ensureScopesForApi(sessionData, res)) return;
+  if (await ensureRefreshTokenForApi(sessionData, res)) return;
   const userId = sessionData.user.id;
   await ensureUserRecord(sessionData);
   sessionData.skipAutoIngest = true;
@@ -212,7 +245,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
   }
 
   markIngestStatus(userId, 'running');
-  triggerBackgroundIngest(sessionSnapshot, userId, { maxPages: 2, minNew: PAGE_SIZE });
+  triggerBackgroundIngest(sessionSnapshot, userId);
   res.json({ status: 'running' });
 });
 
@@ -223,6 +256,7 @@ router.get('/ingest/status', async (req: Request, res: Response) => {
     return res.status(401).json({ status: 'unauthorized' });
   }
   if (ensureScopesForApi(sessionData, res)) return;
+  if (await ensureRefreshTokenForApi(sessionData, res)) return;
   const state = ingestStatus.get(userId) || { status: 'idle', updatedAt: Date.now() };
   res.json({ status: state.status, updatedAt: state.updatedAt, error: state.error });
 });
@@ -252,7 +286,7 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
 
   try {
     const reply = await chatAboutEmail({
-      subject: context.summary.Thread?.subject || '',
+      subject: context.summary.threadIndex?.subject || '',
       headline: context.summary.headline,
       tldr: context.summary.tldr,
       nextStep: context.summary.nextStep,
@@ -286,7 +320,7 @@ router.post('/secretary/auto-summarize', async (req: Request, res: Response) => 
       userId: sessionData.user.id,
       threadId,
       lastMessageId: context.summary.lastMsgId,
-      subject: context.summary.Thread?.subject || '',
+      subject: context.summary.threadIndex?.subject || '',
       headline: context.summary.headline,
       summary: context.summary.tldr,
       nextStep: context.summary.nextStep,
@@ -316,7 +350,7 @@ router.post('/secretary/review', async (req: Request, res: Response) => {
 
   try {
     const review = await chatAboutEmail({
-      subject: context.summary.Thread?.subject || '',
+      subject: context.summary.threadIndex?.subject || '',
       headline: context.summary.headline,
       tldr: context.summary.tldr,
       nextStep: context.summary.nextStep,
@@ -475,7 +509,7 @@ router.post('/secretary/action/draft', async (req: Request, res: Response) => {
       const generated = await generateDraftDetails({
         userId: sessionData.user.id,
         threadId,
-        subject: context.summary.Thread?.subject || '',
+        subject: context.summary.threadIndex?.subject || '',
         headline: context.summary.headline,
         summary: context.summary.tldr,
         nextStep: context.summary.nextStep,
@@ -517,6 +551,10 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
         requestBody: { removeLabelIds: ['INBOX'] }
       });
       await prisma.summary.deleteMany({ where: { userId: sessionData.user.id, threadId } });
+      await prisma.threadIndex.update({
+        where: { threadId_userId: { threadId, userId: sessionData.user.id } },
+        data: { inPrimaryInbox: false }
+      });
       const flow = await prisma.actionFlow.upsert({
         where: { userId_threadId: { userId: sessionData.user.id, threadId } },
         update: {
@@ -564,7 +602,7 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
 
     if (actionType === 'more_info') {
       const reply = await chatAboutEmail({
-        subject: context.summary.Thread?.subject || '',
+        subject: context.summary.threadIndex?.subject || '',
         headline: context.summary.headline,
         tldr: context.summary.tldr,
         nextStep: context.summary.nextStep,
@@ -771,17 +809,13 @@ router.get('/api/threads', async (req: Request, res: Response) => {
   const targetPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
 
   try {
-    // Only fetch the pages we need. If we already have enough summaries for this page, skip ingest.
-    const totalNeeded = targetPage * PAGE_SIZE;
-    const existing = await prisma.summary.count({ where: { userId } });
-    let ingestResult: { hasMore?: boolean } | undefined;
-    if (existing < totalNeeded) {
-      log('ingesting page batch', { requestedPage: targetPage, existing });
-      const minNew = Math.max(PAGE_SIZE, totalNeeded - existing);
-      ingestResult = await ingestInbox(sessionData, { maxPages: targetPage + 1, minNew });
+    const existing = await prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } });
+    if (!existing) {
+      log('ingesting initial index', { requestedPage: targetPage });
+      await ingestInbox(sessionData);
     }
 
-    const pageData = await loadPage(userId, targetPage, { assumeMore: Boolean(ingestResult?.hasMore) });
+    const pageData = await loadPage(userId, targetPage);
     log('page ready', { page: pageData.currentPage, returned: pageData.items.length });
     const threads = await buildThreadsPayload(userId, pageData.items);
     return res.json({
@@ -810,10 +844,10 @@ router.post('/api/archive', async (req: Request, res: Response) => {
   const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
   if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
 
-  const summary = await prisma.summary.findFirst({
-    where: { userId: sessionData.user.id, threadId }
+  const thread = await prisma.threadIndex.findUnique({
+    where: { threadId_userId: { threadId, userId: sessionData.user.id } }
   });
-  if (!summary) return res.status(404).json({ error: 'Email not found in your queue.' });
+  if (!thread) return res.status(404).json({ error: 'Email not found in your queue.' });
 
   const traceId = createTraceId();
   const log = scopedLogger(`archive:${traceId}`);
@@ -829,6 +863,10 @@ router.post('/api/archive', async (req: Request, res: Response) => {
       }
     });
     await prisma.summary.deleteMany({ where: { userId: sessionData.user.id, threadId } });
+    await prisma.threadIndex.update({
+      where: { threadId_userId: { threadId, userId: sessionData.user.id } },
+      data: { inPrimaryInbox: false }
+    });
     log('archived thread', { threadId, userId: sessionData.user.id });
     return res.json({ status: 'archived' });
   } catch (err) {
@@ -917,21 +955,23 @@ async function loadPage(userId: string, requestedPage: number, opts: { assumeMor
 async function loadPageWithOpts(userId: string, requestedPage: number, opts: { assumeMore?: boolean }) {
   const currentPage = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
   const skip = (currentPage - 1) * PAGE_SIZE;
-  const [results, totalItems] = await Promise.all([
-    prisma.summary.findMany({
-      where: { userId },
-      include: { Thread: true },
-      orderBy: [
-        { Thread: { lastMessageTs: 'desc' } },
-        { createdAt: 'desc' }
-      ],
+  const [threads, totalItems] = await Promise.all([
+    prisma.threadIndex.findMany({
+      where: { userId, inPrimaryInbox: true },
+      orderBy: [{ lastMessageDate: 'desc' }],
       skip,
       take: PAGE_SIZE + 1 // fetch one extra so we can keep rendering full pages
-    }) as Promise<SummaryWithThread[]>,
-    prisma.summary.count({ where: { userId } })
+    }),
+    prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } })
   ]);
-  const hasExtraRecord = results.length > PAGE_SIZE;
-  const items = hasExtraRecord ? results.slice(0, PAGE_SIZE) : results;
+  const hasExtraRecord = threads.length > PAGE_SIZE;
+  const pageThreads = hasExtraRecord ? threads.slice(0, PAGE_SIZE) : threads;
+  const threadIds = pageThreads.map(thread => thread.threadId);
+  const summaries = threadIds.length
+    ? await prisma.summary.findMany({ where: { userId, threadId: { in: threadIds } } })
+    : [];
+  const summaryMap = new Map(summaries.map(summary => [summary.threadId, summary]));
+  const items = pageThreads.map(thread => ({ thread, summary: summaryMap.get(thread.threadId) || null }));
   const hasMore = totalItems > skip + items.length || Boolean(opts.assumeMore);
   const baseTotalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
   const totalPages = hasMore ? Math.max(baseTotalPages, currentPage + 1) : baseTotalPages;
@@ -939,26 +979,25 @@ async function loadPageWithOpts(userId: string, requestedPage: number, opts: { a
   return { items, totalItems, totalPages, currentPage, hasMore, nextPage };
 }
 
-async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): Promise<SecretaryThread[]> {
-  const threadIds = items.map(item => item.threadId);
-
+async function buildThreadsPayload(_userId: string, items: ThreadListItem[]): Promise<SecretaryThread[]> {
   const threads: SecretaryThread[] = [];
   for (const item of items) {
-    const participants = parseParticipants(item.Thread?.participants);
-    const emailTs = item.Thread?.lastMessageTs ? new Date(item.Thread.lastMessageTs) : new Date(item.createdAt);
+    const summary = item.summary;
+    const participants = parseParticipants(item.thread.participants);
+    const emailTs = item.thread.lastMessageDate ? new Date(item.thread.lastMessageDate) : new Date();
 
     threads.push({
-      threadId: item.threadId,
-      messageId: item.lastMsgId || '',
-      headline: item.headline || '',
-      from: formatSender(item.Thread),
-      subject: item.Thread?.subject || '(no subject)',
-      summary: item.tldr || '',
-      nextStep: item.nextStep || '',
-      link: item.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(item.threadId)}` : '',
-      category: item.category || '',
+      threadId: item.thread.threadId,
+      messageId: summary?.lastMsgId || item.thread.lastMessageId || '',
+      headline: summary?.headline || '',
+      from: formatSender(item.thread),
+      subject: item.thread.subject || '(no subject)',
+      summary: summary?.tldr || item.thread.snippet || '',
+      nextStep: summary?.nextStep || '',
+      link: item.thread.threadId ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(item.thread.threadId)}` : '',
+      category: summary?.category || '',
       receivedAt: emailTs.toISOString(),
-      convo: item.convoText || '',
+      convo: summary?.convoText || '',
       participants,
       actionFlow: null,
       timeline: []
@@ -967,6 +1006,7 @@ async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): 
 
   return threads;
 }
+
 
 function mergeThreads(primary: SecretaryThread[], extra: SecretaryThread[]) {
   if (!extra.length) return primary;
@@ -1079,10 +1119,18 @@ async function fetchTranscript(threadId: string, req: Request) {
 }
 
 async function loadThreadContext(userId: string, threadId: string, req: Request): Promise<ThreadContext | null> {
-  const summary = await prisma.summary.findFirst({
+  let summary = await prisma.summary.findFirst({
     where: { userId, threadId },
-    include: { Thread: true }
-  }) as SummaryWithThread | null;
+    include: { threadIndex: true }
+  }) as SummaryWithThreadIndex | null;
+  if (!summary) {
+    try {
+      const auth = getAuthedClient((req as any).session);
+      summary = await ensureThreadSummary(auth, userId, threadId);
+    } catch (err) {
+      console.error('Unable to generate summary for thread', err);
+    }
+  }
   if (!summary) return null;
 
   let transcript = summary.convoText || '';
@@ -1093,7 +1141,7 @@ async function loadThreadContext(userId: string, threadId: string, req: Request)
       summary.convoText = transcript;
     }
   }
-  const participants = parseParticipants(summary.Thread?.participants);
+  const participants = parseParticipants(summary.threadIndex?.participants);
   return { summary, transcript, participants };
 }
 
@@ -1323,7 +1371,7 @@ function selectDraftPayload(
 ) {
   const parsedExisting = parseDraftPayload(existingPayload);
   const existing = typeof parsedExisting === 'object' && parsedExisting !== null ? parsedExisting : {};
-  const title = inputDraft.title || String(existing.title || context.summary.headline || context.summary.tldr || context.summary.Thread?.subject || 'New task');
+  const title = inputDraft.title || String(existing.title || context.summary.headline || context.summary.tldr || context.summary.threadIndex?.subject || 'New task');
   const notes = inputDraft.notes ?? String(existing.notes || context.summary.tldr || '');
   const dueDate = inputDraft.dueDate ?? (typeof existing.dueDate === 'string' ? existing.dueDate : null);
   return {
@@ -1405,8 +1453,8 @@ function createTraceId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function triggerBackgroundIngest(sessionData: any, userId: string, opts?: { maxPages?: number; minNew?: number }) {
-  ingestInbox(sessionData, opts)
+function triggerBackgroundIngest(sessionData: any, userId: string) {
+  ingestInbox(sessionData)
     .then(() => {
       markIngestStatus(userId, 'done');
     })
