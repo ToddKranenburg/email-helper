@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
+import { loadPriorityQueue, type PriorityEntry } from '../actions/priorityQueue.js';
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -27,6 +28,7 @@ import {
 
 export const router = Router();
 const PAGE_SIZE = 20;
+const PRIORITY_LIMIT = 6;
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
@@ -163,6 +165,11 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const threads = await buildThreadsPayload(userId, pageData.items);
+  const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
+  const priorityThreads = priorityQueue.items.length
+    ? await buildThreadsPayload(userId, priorityQueue.items)
+    : [];
+  const mergedThreads = mergeThreads(threads, priorityThreads);
 
   // Inject a small flag the client script can read to auto-trigger ingest
   const renderStart = performance.now();
@@ -173,7 +180,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     hasMore: pageData.hasMore,
     nextPage: pageData.nextPage
   };
-  const withFlag = `${render(body, threads, pageMeta)}
+  const withFlag = `${render(body, mergedThreads, pageMeta, priorityQueue.priority)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -798,6 +805,18 @@ async function buildThreadsPayload(userId: string, items: SummaryWithThread[]): 
   return threads;
 }
 
+function mergeThreads(primary: SecretaryThread[], extra: SecretaryThread[]) {
+  if (!extra.length) return primary;
+  const seen = new Set(primary.map(thread => thread.threadId));
+  const merged = primary.slice();
+  extra.forEach(thread => {
+    if (seen.has(thread.threadId)) return;
+    seen.add(thread.threadId);
+    merged.push(thread);
+  });
+  return merged;
+}
+
 function emojiForCategory(cat: string): string {
   const c = (cat || '').toLowerCase();
   if (c.startsWith('marketing')) return '🏷️';
@@ -811,14 +830,15 @@ function emojiForCategory(cat: string): string {
   return '📎';
 }
 
-function render(tpl: string, items: SecretaryThread[], meta: PageMeta) {
-  const secretaryScript = renderSecretaryAssistant(items, meta);
+function render(tpl: string, items: SecretaryThread[], meta: PageMeta, priority: PriorityEntry[]) {
+  const secretaryScript = renderSecretaryAssistant(items, meta, priority);
   return `${tpl}\n${secretaryScript}`;
 }
 
-function renderSecretaryAssistant(items: SecretaryThread[], meta: PageMeta) {
+function renderSecretaryAssistant(items: SecretaryThread[], meta: PageMeta, priority: PriorityEntry[]) {
   const payload = safeJson({
     threads: items,
+    priority,
     maxTurns: MAX_CHAT_TURNS,
     totalItems: meta.totalItems,
     pageSize: meta.pageSize,

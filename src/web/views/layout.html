@@ -21,6 +21,9 @@
       --pill: rgba(0,168,132,0.1);
       --user-bubble: #d9fdd3;
       --assistant-bubble: #ffffff;
+      --priority-accent: #f2a400;
+      --priority-soft: #fff1d6;
+      --priority-ink: #8a5a00;
     }
     *, *::before, *::after { box-sizing: border-box; }
     body {
@@ -1047,6 +1050,37 @@
       min-height: 0;
       overflow: hidden;
     }
+    .priority-queue {
+      border: 1px solid rgba(242,164,0,0.35);
+      border-radius: 16px;
+      padding: 10px;
+      background: linear-gradient(180deg, rgba(255,241,214,0.85), rgba(255,255,255,0.95));
+      box-shadow: 0 10px 26px rgba(242,164,0,0.12);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 240px;
+    }
+    .priority-queue-head {
+      padding: 0;
+    }
+    .priority-label {
+      color: var(--priority-ink);
+    }
+    .priority-count {
+      color: #1d1a10;
+    }
+    .priority-subtext {
+      color: rgba(138,90,0,0.7);
+    }
+    .priority-list {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .priority-empty {
+      color: rgba(138,90,0,0.7);
+    }
     .review-queue-head {
       display: flex;
       justify-content: space-between;
@@ -1119,6 +1153,14 @@
       border-color: rgba(0,168,132,0.35);
       outline: none;
     }
+    .queue-item.priority-item {
+      border-color: rgba(242,164,0,0.35);
+      background: #fffaf0;
+    }
+    .queue-item.priority-item:hover,
+    .queue-item.priority-item:focus-visible {
+      border-color: rgba(242,164,0,0.8);
+    }
     .queue-item.load-more {
       align-items: center;
       justify-content: center;
@@ -1131,6 +1173,10 @@
     .queue-item.active {
       border-color: var(--accent);
       background: rgba(0,168,132,0.12);
+    }
+    .queue-item.priority-item.active {
+      border-color: var(--priority-accent);
+      background: rgba(242,164,0,0.18);
     }
     .queue-item strong {
       font-size: 14px;
@@ -1145,6 +1191,11 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .queue-item .priority-reason {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--priority-ink);
     }
 
     details summary {

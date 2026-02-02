@@ -1,6 +1,9 @@
 (function () {
   const bootstrap = window.SECRETARY_BOOTSTRAP || {};
   const threads = Array.isArray(bootstrap.threads) ? bootstrap.threads : [];
+  const priorityPayload = Array.isArray(bootstrap.priority) ? bootstrap.priority : null;
+  const priorityItems = normalizePriorityItems(priorityPayload);
+  const hasServerPriority = Array.isArray(bootstrap.priority);
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
   const PAGE_SIZE = typeof bootstrap.pageSize === 'number' ? bootstrap.pageSize : 20;
   const HAS_MORE = Boolean(bootstrap.hasMore);
@@ -14,6 +17,15 @@
     'Picking this back up. Need a quick refresher?',
     'Returning to this thread. What’s the next move?'
   ];
+  const PRIORITY_LIMIT = 6;
+  const PRIORITY_MIN_SCORE = 4;
+  const PRIORITY_PATTERNS = {
+    urgent: /\b(urgent|asap|immediately|time[-\s]?sensitive|deadline|final notice|action required|response required|reply needed|respond by|past due|overdue|expir(?:e|es|ing))\b/i,
+    security: /\b(security|verify|verification|password|2fa|unauthorized|suspicious|fraud|breach|locked?|login|sign[-\s]?in|account alert)\b/i,
+    payment: /\b(payment|invoice|receipt|billing|charge|charged|refund|past due|overdue|card)\b/i,
+    approval: /\b(approve|approval|sign[-\s]?off|contract|legal|compliance|policy)\b/i,
+    scheduling: /\b(meeting|call|calendar|schedule|reschedule|availability|zoom|appointment|rsvp|invite)\b/i
+  };
   window.SECRETARY_BOOTSTRAP = undefined;
   const debugEnabled = true;
   const logDebug = (...args) => {
@@ -27,6 +39,7 @@
     loadMoreHead: document.getElementById('load-more-head'),
     progress: document.getElementById('triage-progress'),
     progressTrack: document.querySelector('.triage-progress'),
+    priorityPill: document.getElementById('priority-pill-text'),
     queuePill: document.getElementById('queue-pill-text'),
     emailEmpty: document.getElementById('email-empty'),
     loadMoreEmpty: document.getElementById('load-more-empty'),
@@ -54,6 +67,7 @@
     taskSubmit: document.getElementById('task-submit'),
     taskReset: document.getElementById('task-reset'),
     taskClose: document.getElementById('task-close'),
+    priorityList: document.getElementById('priority-list'),
     reviewList: document.getElementById('review-list')
   };
   const loadingOverlay = document.getElementById('loading');
@@ -71,6 +85,9 @@
     lookup: new Map(),
     positions: new Map(),
     needs: [],
+    priority: [],
+    priorityMeta: new Map(),
+    prioritySource: hasServerPriority ? 'server' : 'local',
     histories: new Map(),
     timeline: [],
     timelineMessageIds: new Set(),
@@ -132,20 +149,34 @@
       actionFlow: normalized.actionFlow
     });
   });
+
+  if (hasServerPriority) {
+    state.priority = priorityItems.map(item => item.threadId);
+    priorityItems.forEach(item => {
+      state.priorityMeta.set(item.threadId, {
+        score: item.score,
+        reason: item.reason,
+        reasonWeight: item.reasonWeight
+      });
+    });
+  }
   state.totalLoaded = state.positions.size;
 
   init();
 
   function init() {
+    rebuildPriorityQueue();
     updateHeaderCount();
     updateProgress();
+    updatePriorityPill();
     updateQueuePill();
     updateDrawerLists();
     updateLoadMoreButtons();
     wireEvents();
 
     if (state.needs.length) {
-      setActiveThread(state.needs[0]);
+      const startId = getNextReviewCandidate() || state.needs[0];
+      setActiveThread(startId);
     } else {
       setEmptyState('No emails queued. Tap Sync Gmail to pull fresh ones.');
       toggleComposer(false);
@@ -186,6 +217,7 @@
       });
     }
 
+    if (refs.priorityList) refs.priorityList.addEventListener('click', (event) => handleThreadListClick(event, 'priority'));
     if (refs.reviewList) refs.reviewList.addEventListener('click', (event) => handleThreadListClick(event, 'queue'));
 
     document.addEventListener('click', (event) => {
@@ -223,7 +255,7 @@
       fetchNextPage('button');
       return;
     }
-    const selector = variant === 'queue' ? '.queue-item' : '.drawer-thread';
+    const selector = variant === 'drawer' ? '.drawer-thread' : '.queue-item';
     const target = targetEl.closest(selector);
     if (!target) return;
     const threadId = target.dataset.threadId;
@@ -519,6 +551,9 @@
     state.actionFlows.set(threadId, flow);
     const thread = state.lookup.get(threadId);
     if (thread) thread.actionFlow = flow;
+    rebuildPriorityQueue();
+    updatePriorityPill();
+    updateDrawerLists();
   }
 
   function readInlineEditorValues(editorEl) {
@@ -568,7 +603,8 @@
         updateEmailCard(state.lookup.get(state.activeId));
       }
       if (!state.activeId && state.needs.length && reason !== 'auto') {
-        setActiveThread(state.needs[0]);
+        const nextId = getNextReviewCandidate() || state.needs[0];
+        setActiveThread(nextId);
       }
       return added;
     } catch (err) {
@@ -969,6 +1005,16 @@
     refs.queuePill.textContent = state.hasMore ? 'Load more to continue' : 'All done';
   }
 
+  function updatePriorityPill() {
+    if (!refs.priorityPill) return;
+    const remaining = state.priority.length;
+    if (remaining) {
+      refs.priorityPill.textContent = `${remaining} urgent`;
+      return;
+    }
+    refs.priorityPill.textContent = state.needs.length ? 'All clear' : 'No priority mail';
+  }
+
   function updateLoadMoreButtons() {
     if (refs.loadMoreHead) {
       refs.loadMoreHead.classList.remove('hidden');
@@ -1019,23 +1065,35 @@
   }
 
   function updateDrawerLists() {
+    renderThreadList(refs.priorityList, 'priority');
     renderThreadList(refs.reviewList, 'queue');
+  }
+
+  function getThreadListIds(variant) {
+    if (variant === 'priority') return state.priority;
+    return state.needs;
   }
 
   function renderThreadList(listEl, variant = 'drawer') {
     if (!listEl) return;
     listEl.innerHTML = '';
 
-    if (state.needs.length) {
-      state.needs.forEach(id => appendThreadItem(listEl, id, variant));
+    const ids = getThreadListIds(variant);
+    if (ids.length) {
+      ids.forEach(id => appendThreadItem(listEl, id, variant));
     } else {
       const li = document.createElement('li');
       li.className = variant === 'queue' ? 'queue-empty drawer-empty' : 'drawer-empty';
-      li.textContent = 'Nothing queued up.';
+      if (variant === 'priority') {
+        li.className = 'queue-empty priority-empty';
+        li.textContent = 'No urgent emails right now.';
+      } else {
+        li.textContent = 'Nothing queued up.';
+      }
       listEl.appendChild(li);
     }
 
-    if (state.hasMore) {
+    if (variant === 'queue' && state.hasMore) {
       const li = document.createElement('li');
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -1057,18 +1115,175 @@
     btn.dataset.threadId = threadId;
     const receivedAt = thread.receivedAt ? formatQueueTimestamp(thread.receivedAt) : '';
     const timeHtml = receivedAt ? `<span class="queue-item-time">${htmlEscape(receivedAt)}</span>` : '';
-    btn.innerHTML = `<div class="queue-item-header"><strong>${htmlEscape(thread.from || 'Unknown sender')}</strong>${timeHtml}</div><span>${htmlEscape(thread.subject || '(no subject)')}</span>`;
+    const reason = variant === 'priority' ? getPriorityReason(threadId) : '';
+    const reasonHtml = reason ? `<span class="priority-reason">${htmlEscape(reason)}</span>` : '';
+    btn.innerHTML = `<div class="queue-item-header"><strong>${htmlEscape(thread.from || 'Unknown sender')}</strong>${timeHtml}</div><span>${htmlEscape(thread.subject || '(no subject)')}</span>${reasonHtml}`;
     li.appendChild(btn);
     listEl.appendChild(li);
   }
 
   function buildThreadClass(variant, options = {}) {
     const { loadMore = false, active = false } = options;
-    const base = variant === 'queue' ? 'queue-item' : 'drawer-thread';
+    const base = variant === 'queue' || variant === 'priority' ? 'queue-item' : 'drawer-thread';
     const classes = [base];
+    if (variant === 'priority') classes.push('priority-item');
     if (loadMore) classes.push('load-more');
     if (active) classes.push('active');
     return classes.join(' ');
+  }
+
+  function rebuildPriorityQueue() {
+    if (state.prioritySource === 'server') {
+      const needsSet = new Set(state.needs);
+      state.priority = state.priority.filter(id => needsSet.has(id) && !reviewedIds.has(id));
+      for (const key of state.priorityMeta.keys()) {
+        if (!needsSet.has(key) || reviewedIds.has(key)) {
+          state.priorityMeta.delete(key);
+        }
+      }
+      return;
+    }
+    const scored = [];
+    state.priorityMeta.clear();
+    state.needs.forEach(threadId => {
+      if (reviewedIds.has(threadId)) return;
+      const thread = state.lookup.get(threadId);
+      if (!thread) return;
+      const evaluation = scoreThreadPriority(thread);
+      state.priorityMeta.set(threadId, evaluation);
+      if (evaluation.score >= PRIORITY_MIN_SCORE) {
+        scored.push({
+          threadId,
+          score: evaluation.score,
+          reasonWeight: evaluation.reasonWeight,
+          receivedAt: thread.receivedAt || ''
+        });
+      }
+    });
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.reasonWeight !== a.reasonWeight) return b.reasonWeight - a.reasonWeight;
+      const aTime = a.receivedAt ? new Date(a.receivedAt).getTime() : 0;
+      const bTime = b.receivedAt ? new Date(b.receivedAt).getTime() : 0;
+      return bTime - aTime;
+    });
+    state.priority = scored.slice(0, PRIORITY_LIMIT).map(item => item.threadId);
+  }
+
+  function scoreThreadPriority(thread) {
+    const signals = [];
+    let score = 0;
+    const text = buildPriorityText(thread);
+    const nextStep = typeof thread.nextStep === 'string' ? thread.nextStep.trim() : '';
+
+    if (requiresAction(nextStep)) {
+      score += addPrioritySignal(signals, 'Action needed', 2);
+    }
+
+    if (thread?.actionFlow?.actionType === 'external_action') {
+      score += addPrioritySignal(signals, 'Action required', 4);
+    }
+
+    const dueSignal = applyDueSignal(text, signals);
+    score += dueSignal;
+
+    if (PRIORITY_PATTERNS.urgent.test(text)) {
+      score += addPrioritySignal(signals, 'Time-sensitive', 2);
+    }
+    if (PRIORITY_PATTERNS.security.test(text)) {
+      score += addPrioritySignal(signals, 'Account alert', 4);
+    }
+    if (PRIORITY_PATTERNS.payment.test(text)) {
+      score += addPrioritySignal(signals, 'Payment issue', 2);
+    }
+    if (PRIORITY_PATTERNS.approval.test(text)) {
+      score += addPrioritySignal(signals, 'Needs approval', 2);
+    }
+    if (PRIORITY_PATTERNS.scheduling.test(text)) {
+      score += addPrioritySignal(signals, 'Scheduling', 1);
+    }
+
+    const categoryBoost = categoryPriorityBoost(thread.category);
+    score += categoryBoost.score;
+    if (categoryBoost.label) {
+      addPrioritySignal(signals, categoryBoost.label, categoryBoost.score);
+    }
+
+    const normalizedScore = Math.max(0, score);
+    const reason = pickPriorityReason(signals);
+    return {
+      score: normalizedScore,
+      reason: reason?.label || 'Needs attention',
+      reasonWeight: reason?.weight || 0
+    };
+  }
+
+  function buildPriorityText(thread) {
+    return [thread.nextStep, thread.summary, thread.headline, thread.subject].filter(Boolean).join(' ');
+  }
+
+  function requiresAction(nextStep) {
+    const text = (nextStep || '').toLowerCase();
+    if (!text) return false;
+    return !/(no action|fyi|none|no need|no response needed)/i.test(text);
+  }
+
+  function addPrioritySignal(signals, label, weight) {
+    if (!label || !weight) return 0;
+    signals.push({ label, weight });
+    return weight;
+  }
+
+  function applyDueSignal(text, signals) {
+    const raw = extractDateFromText(text);
+    const due = parsePriorityDate(raw);
+    if (!due) return 0;
+    const days = diffCalendarDays(new Date(), due);
+    if (days < 0) return addPrioritySignal(signals, 'Overdue', 4);
+    if (days === 0) return addPrioritySignal(signals, 'Due today', 3);
+    if (days === 1) return addPrioritySignal(signals, 'Due tomorrow', 3);
+    if (days <= 3) return addPrioritySignal(signals, 'Due soon', 2);
+    if (days <= 7) return addPrioritySignal(signals, 'Due this week', 1);
+    return 0;
+  }
+
+  function parsePriorityDate(raw) {
+    if (!raw) return null;
+    const iso = raw.length === 10 ? `${raw}T00:00:00` : raw;
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+
+  function diffCalendarDays(from, to) {
+    const start = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+    return Math.round((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+  }
+
+  function categoryPriorityBoost(category) {
+    const label = typeof category === 'string' ? category.toLowerCase() : '';
+    if (label.includes('billing')) return { score: 2, label: 'Billing' };
+    if (label.includes('personal request')) return { score: 2, label: 'Personal request' };
+    if (label.includes('introduction')) return { score: 1, label: 'Introduction' };
+    if (label.includes('personal event')) return { score: 1, label: 'Event planning' };
+    if (label.includes('catch up')) return { score: 0, label: '' };
+    if (label.includes('marketing') || label.includes('promotion')) return { score: -3, label: '' };
+    if (label.includes('editorial') || label.includes('writing')) return { score: -2, label: '' };
+    if (label.includes('fyi')) return { score: -1, label: '' };
+    return { score: 0, label: '' };
+  }
+
+  function pickPriorityReason(signals) {
+    if (!signals.length) return null;
+    const sorted = signals.slice().sort((a, b) => b.weight - a.weight);
+    return sorted[0] || null;
+  }
+
+  function getPriorityReason(threadId) {
+    const meta = state.priorityMeta.get(threadId);
+    if (!meta) return 'Needs attention';
+    return meta.reason || 'Needs attention';
   }
 
   function appendThreads(items) {
@@ -1086,6 +1301,8 @@
     });
     if (added.length) {
       state.totalLoaded = state.positions.size;
+      rebuildPriorityQueue();
+      updatePriorityPill();
     }
     return added;
   }
@@ -1112,6 +1329,28 @@
       actionFlow: normalizeActionFlow(raw.actionFlow),
       timeline: Array.isArray(raw.timeline) ? raw.timeline.map(normalizeTimelineMessage).filter(Boolean) : []
     };
+  }
+
+  function normalizePriorityItems(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const threadId = typeof item.threadId === 'string' ? item.threadId.trim() : '';
+        if (!threadId) return null;
+        const reason = typeof item.reason === 'string' ? item.reason.trim() : '';
+        const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 0;
+        const reasonWeight = typeof item.reasonWeight === 'number' && Number.isFinite(item.reasonWeight)
+          ? item.reasonWeight
+          : 0;
+        return {
+          threadId,
+          reason: reason || 'Needs attention',
+          score,
+          reasonWeight
+        };
+      })
+      .filter(Boolean);
   }
 
   function normalizeActionFlow(raw) {
@@ -1835,13 +2074,17 @@
   function removeCurrentFromQueue() {
     if (!state.activeId || !state.needs.length) return;
     const threadId = state.activeId;
+    const order = getReviewOrder();
+    const orderIndex = order.indexOf(threadId);
     const index = state.needs.indexOf(threadId);
     if (index === -1) return;
     state.needs.splice(index, 1);
     markReviewed(threadId);
+    rebuildPriorityQueue();
     updateProgress();
     updateDrawerLists();
     updateHeaderCount();
+    updatePriorityPill();
     updateQueuePill();
     closeTaskPanel(true);
     clearPendingSuggestedAction(threadId);
@@ -1855,7 +2098,11 @@
       }
       return;
     }
-    const nextId = getNextUnreviewedAfter(threadId, { startIndex: index, allowWrap: !state.hasMore });
+    const nextId = getNextUnreviewedAfter(threadId, {
+      order,
+      startIndex: orderIndex + 1,
+      allowWrap: !state.hasMore
+    });
     if (nextId) {
       setActiveThread(nextId);
       return;
@@ -1874,7 +2121,7 @@
     toggleComposer(false);
     const added = await fetchNextPage('auto');
     if (added.length) {
-      const nextId = added.find(id => !reviewedIds.has(id)) || added[0];
+      const nextId = getNextReviewCandidate();
       if (nextId) {
         setActiveThread(nextId);
         return;
@@ -1890,15 +2137,16 @@
   }
 
   function advanceToNextThread(threadId = state.activeId) {
-    if (!threadId || !state.needs.length) return;
-    const index = state.needs.indexOf(threadId);
+    const order = getReviewOrder();
+    if (!threadId || !order.length) return;
+    const index = order.indexOf(threadId);
     if (index === -1) return;
     if (index === state.needs.length - 1 && state.hasMore) {
       autoLoadNextBatch();
       return;
     }
-    const nextIndex = state.needs.length > 1 ? (index + 1) % state.needs.length : -1;
-    const nextId = nextIndex >= 0 ? state.needs[nextIndex] : '';
+    const nextIndex = order.length > 1 ? (index + 1) % order.length : -1;
+    const nextId = nextIndex >= 0 ? order[nextIndex] : '';
     if (nextId && nextId !== threadId) {
       setActiveThread(nextId);
     }
@@ -1907,16 +2155,23 @@
   function skipCurrent(source) {
     if (!state.activeId) return;
     const threadId = state.activeId;
-    const index = state.needs.indexOf(threadId);
-    const hasRoomToAdvance = state.needs.length > 1;
+    const order = getReviewOrder();
+    const index = order.indexOf(threadId);
+    const hasRoomToAdvance = order.length > 1;
     markReviewed(threadId);
+    rebuildPriorityQueue();
     updateProgress();
     updateDrawerLists();
     updateHeaderCount();
+    updatePriorityPill();
     updateQueuePill();
     closeTaskPanel(true);
     clearPendingSuggestedAction(threadId);
-    const nextId = getNextUnreviewedAfter(threadId, { startIndex: index + 1, allowWrap: !state.hasMore });
+    const nextId = getNextUnreviewedAfter(threadId, {
+      order,
+      startIndex: index + 1,
+      allowWrap: !state.hasMore
+    });
     if (nextId) {
       setActiveThread(nextId);
       return;
@@ -1930,24 +2185,50 @@
       toggleComposer(false);
       return;
     }
-    const nextIndex = index === -1 ? 0 : (index + 1) % state.needs.length;
-    const fallbackId = state.needs[nextIndex] || state.needs[0];
+    const nextIndex = index === -1 ? 0 : (index + 1) % order.length;
+    const fallbackId = order[nextIndex] || order[0];
     if (fallbackId) {
       setActiveThread(fallbackId);
     }
   }
 
+  function getReviewOrder() {
+    if (!state.needs.length) return [];
+    const needsSet = new Set(state.needs);
+    const prioritySet = new Set(state.priority);
+    const ordered = [];
+    state.priority.forEach(id => {
+      if (needsSet.has(id)) ordered.push(id);
+    });
+    state.needs.forEach(id => {
+      if (!prioritySet.has(id)) ordered.push(id);
+    });
+    return ordered;
+  }
+
+  function getNextReviewCandidate() {
+    const order = getReviewOrder();
+    for (let i = 0; i < order.length; i += 1) {
+      const candidate = order[i];
+      if (!reviewedIds.has(candidate)) return candidate;
+    }
+    return '';
+  }
+
   function getNextUnreviewedAfter(threadId, options = {}) {
-    if (!state.needs.length) return '';
+    const order = Array.isArray(options.order) ? options.order : state.needs;
+    if (!order.length || !state.needs.length) return '';
     const allowWrap = options.allowWrap !== undefined ? Boolean(options.allowWrap) : true;
     const providedStart = Number.isInteger(options.startIndex) ? Number(options.startIndex) : null;
     const startIndex = providedStart !== null
       ? Math.max(0, providedStart)
-      : Math.max(0, state.needs.indexOf(threadId) + 1);
-    const maxOffset = allowWrap ? state.needs.length : Math.max(0, state.needs.length - startIndex);
+      : Math.max(0, order.indexOf(threadId) + 1);
+    const needsSet = new Set(state.needs);
+    const maxOffset = allowWrap ? order.length : Math.max(0, order.length - startIndex);
     for (let offset = 0; offset < maxOffset; offset += 1) {
-      const index = allowWrap ? (startIndex + offset) % state.needs.length : startIndex + offset;
-      const candidate = state.needs[index];
+      const index = allowWrap ? (startIndex + offset) % order.length : startIndex + offset;
+      const candidate = order[index];
+      if (!needsSet.has(candidate)) continue;
       if (!reviewedIds.has(candidate)) return candidate;
     }
     return '';
