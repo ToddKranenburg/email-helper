@@ -93,10 +93,8 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
     try {
       const tokenInfo = await oauthClient.getTokenInfo(tokens.access_token);
       const infoScopes = Array.isArray(tokenInfo?.scopes)
-        ? tokenInfo.scopes
-        : typeof tokenInfo?.scope === 'string'
-          ? tokenInfo.scope.split(/\s+/).map(s => s.trim()).filter(Boolean)
-          : [];
+        ? tokenInfo.scopes.map((s: string) => s.trim()).filter(Boolean)
+        : [];
       if (infoScopes.length) {
         tokens.scope = infoScopes.join(' ');
         missingScopes = getMissingGmailScopes(tokens);
