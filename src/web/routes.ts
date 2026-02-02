@@ -395,13 +395,13 @@ router.post('/secretary/reply-draft', async (req: Request, res: Response) => {
 
   try {
     const draft = await generateReplyDraft({
-      subject: context.summary.Thread?.subject || '',
+      subject: context.summary.threadIndex?.subject || '',
       headline: context.summary.headline,
       summary: context.summary.tldr,
       nextStep: context.summary.nextStep,
       participants: context.participants,
       transcript: context.transcript,
-      fromLine: formatSender(context.summary.Thread)
+      fromLine: formatSender(context.summary.threadIndex)
     });
     const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
     const signoffUser = await resolveUserForSignoff(sessionData);
@@ -436,13 +436,13 @@ router.post('/secretary/reply-intent-draft', async (req: Request, res: Response)
 
   try {
     const draft = await generateGuidedReplyDraft({
-      subject: context.summary.Thread?.subject || '',
+      subject: context.summary.threadIndex?.subject || '',
       headline: context.summary.headline,
       summary: context.summary.tldr,
       nextStep: context.summary.nextStep,
       participants: context.participants,
       transcript: context.transcript,
-      fromLine: formatSender(context.summary.Thread),
+      fromLine: formatSender(context.summary.threadIndex),
       userInstruction: text
     });
     const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
@@ -655,7 +655,7 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       const auth = getAuthedClient(sessionData);
       const gmail = gmailClient(auth);
       const replyMeta = await fetchReplyMetadata(gmail, context.summary.lastMsgId);
-      const replyTarget = selectReplyTarget(replyMeta, context.summary.Thread, context.participants, sessionData.user.email);
+      const replyTarget = selectReplyTarget(replyMeta, context.summary.threadIndex, context.participants, sessionData.user.email);
       if (!replyTarget.to) {
         return res.status(400).json({ error: 'Unable to identify a sender to reply to.' });
       }
@@ -663,7 +663,7 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       if (replyTarget.email && normalizedUser && replyTarget.email.toLowerCase() === normalizedUser) {
         return res.status(400).json({ error: 'Unable to find a sender to reply to in this thread.' });
       }
-      const subject = buildReplySubject(replyMeta.subject || context.summary.Thread?.subject || '');
+      const subject = buildReplySubject(replyMeta.subject || context.summary.threadIndex?.subject || '');
       const references = mergeReferences(replyMeta.references, replyMeta.messageId);
       const raw = buildReplyMessage({
         to: replyTarget.to,

@@ -130,7 +130,8 @@ export async function ensureThreadSummary(
         userId,
         lastMsgId: latest.id
       }
-    }
+    },
+    include: { threadIndex: true }
   });
   if (existingLatest && !opts.forceFresh) {
     return existingLatest;

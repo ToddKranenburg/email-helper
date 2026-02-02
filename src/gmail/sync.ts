@@ -214,19 +214,19 @@ export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: 
   let pageToken: string | undefined = undefined;
 
   while (fetchedThreadIds.size < INITIAL_SYNC_MAX_THREADS) {
-    const list = await gmail.users.threads.list({
+    const list: gmail_v1.Schema$ListThreadsResponse = (await gmail.users.threads.list({
       userId: 'me',
       q: query,
       pageToken,
       maxResults: Math.min(100, INITIAL_SYNC_MAX_THREADS - fetchedThreadIds.size)
-    });
+    })).data;
 
-    const threads = (list.data.threads || []).filter(
+    const threads = (list.threads || []).filter(
       (thread: gmail_v1.Schema$Thread | null | undefined): thread is gmail_v1.Schema$Thread => Boolean(thread?.id)
     );
 
     await Promise.all(
-      threads.map(thread => limit(async () => {
+      threads.map((thread: gmail_v1.Schema$Thread) => limit(async () => {
         if (!thread.id) return;
         fetchedThreadIds.add(thread.id);
         const full = await gmail.users.threads.get({
@@ -246,7 +246,7 @@ export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: 
       }))
     );
 
-    pageToken = list.data.nextPageToken || undefined;
+    pageToken = list.nextPageToken || undefined;
     if (!pageToken) break;
   }
 
@@ -320,23 +320,23 @@ export async function incrementalSyncFromHistoryCursor(auth: OAuth2Client, userI
 
   try {
     do {
-      const response = await gmail.users.history.list({
+      const response: gmail_v1.Schema$ListHistoryResponse = (await gmail.users.history.list({
         userId: 'me',
         startHistoryId: account.historyCursor,
         maxResults: HISTORY_PAGE_LIMIT,
         pageToken,
         historyTypes: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved']
-      });
+      })).data;
 
-      if (response.data.historyId) {
-        historyCursor = response.data.historyId;
+      if (response.historyId) {
+        historyCursor = response.historyId;
       }
 
-      const history = response.data.history || [];
+      const history = response.history || [];
       const threadIds = extractHistoryThreadIds(history);
       threadIds.forEach(id => affectedThreadIds.add(id));
 
-      pageToken = response.data.nextPageToken || undefined;
+      pageToken = response.nextPageToken || undefined;
     } while (pageToken);
   } catch (err) {
     if (isHistoryTooOld(err)) {
