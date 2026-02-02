@@ -2,6 +2,9 @@
   const bootstrap = window.SECRETARY_BOOTSTRAP || {};
   const threads = Array.isArray(bootstrap.threads) ? bootstrap.threads : [];
   const priorityPayload = Array.isArray(bootstrap.priority) ? bootstrap.priority : null;
+  const priorityBatchFinishedAt = typeof bootstrap.priorityBatchFinishedAt === 'string'
+    ? bootstrap.priorityBatchFinishedAt
+    : null;
   const priorityItems = normalizePriorityItems(priorityPayload);
   const hasServerPriority = Array.isArray(bootstrap.priority);
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
@@ -19,6 +22,10 @@
   ];
   const PRIORITY_LIMIT = 6;
   const PRIORITY_MIN_SCORE = 4;
+  const PRIORITY_POLL_INTERVAL_MS = 8000;
+  const PRIORITY_LOADING_MIN_MS = 450;
+  const PRIORITY_SYNC_STORAGE_KEY = 'prioritySyncStartAt';
+  const PRIORITY_SYNC_MAX_AGE_MS = 10 * 60 * 1000;
   const PRIORITY_PATTERNS = {
     urgent: /\b(urgent|asap|immediately|time[-\s]?sensitive|deadline|final notice|action required|response required|reply needed|respond by|past due|overdue|expir(?:e|es|ing))\b/i,
     security: /\b(security|verify|verification|password|2fa|unauthorized|suspicious|fraud|breach|locked?|login|sign[-\s]?in|account alert)\b/i,
@@ -33,6 +40,33 @@
     // eslint-disable-next-line no-console
     console.info('[secretary]', ...args);
   };
+
+  function parseTimestamp(value) {
+    if (!value) return 0;
+    const ts = Date.parse(value);
+    return Number.isFinite(ts) ? ts : 0;
+  }
+
+  function readPrioritySyncStart() {
+    const raw = window.localStorage.getItem(PRIORITY_SYNC_STORAGE_KEY);
+    if (!raw) return 0;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return 0;
+    if (Date.now() - value > PRIORITY_SYNC_MAX_AGE_MS) {
+      window.localStorage.removeItem(PRIORITY_SYNC_STORAGE_KEY);
+      return 0;
+    }
+    return value;
+  }
+
+  function writePrioritySyncStart(ts) {
+    if (!ts) return;
+    window.localStorage.setItem(PRIORITY_SYNC_STORAGE_KEY, String(ts));
+  }
+
+  function clearPrioritySyncStart() {
+    window.localStorage.removeItem(PRIORITY_SYNC_STORAGE_KEY);
+  }
 
   const refs = {
     count: document.getElementById('triage-count'),
@@ -78,7 +112,8 @@
     replyCancel: document.getElementById('reply-cancel'),
     replySubmit: document.getElementById('reply-submit'),
     replyClose: document.getElementById('reply-close'),
-    reviewList: document.getElementById('review-list')
+    reviewList: document.getElementById('review-list'),
+    syncForm: document.getElementById('ingest-form')
   };
   const loadingOverlay = document.getElementById('loading');
   const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
@@ -98,6 +133,11 @@
     priority: [],
     priorityMeta: new Map(),
     prioritySource: hasServerPriority ? 'server' : 'local',
+    priorityLoading: false,
+    prioritySyncStartAt: 0,
+    priorityLastBatchAt: parseTimestamp(priorityBatchFinishedAt),
+    priorityPolling: false,
+    priorityPollTimer: 0,
     histories: new Map(),
     timeline: [],
     timelineMessageIds: new Set(),
@@ -185,6 +225,10 @@
   init();
 
   function init() {
+    state.prioritySyncStartAt = readPrioritySyncStart();
+    if (state.prioritySyncStartAt && (!state.priorityLastBatchAt || state.priorityLastBatchAt < state.prioritySyncStartAt)) {
+      state.priorityLoading = true;
+    }
     rebuildPriorityQueue();
     updateHeaderCount();
     updateProgress();
@@ -193,6 +237,7 @@
     updateDrawerLists();
     updateLoadMoreButtons();
     wireEvents();
+    startPriorityPolling();
 
     if (state.needs.length) {
       const startId = getNextReviewCandidate() || state.needs[0];
@@ -208,6 +253,15 @@
     refs.chatInput.addEventListener('keydown', handleChatKeydown);
     refs.chatInput.addEventListener('input', clearComposerNudge);
     refs.chatLog.addEventListener('click', handleTimelineClick);
+    if (refs.syncForm) {
+      refs.syncForm.addEventListener('submit', () => {
+        const now = Date.now();
+        state.prioritySyncStartAt = now;
+        writePrioritySyncStart(now);
+        setPriorityLoading(true);
+        startPriorityPolling();
+      });
+    }
 
     if (refs.reviewBtn) {
       refs.reviewBtn.addEventListener('click', () => requestReview());
@@ -1431,6 +1485,10 @@
 
   function updatePriorityPill() {
     if (!refs.priorityPill) return;
+    if (state.priorityLoading) {
+      refs.priorityPill.textContent = 'Prioritizing…';
+      return;
+    }
     const remaining = state.priority.length;
     if (remaining) {
       refs.priorityPill.textContent = `${remaining} urgent`;
@@ -1493,6 +1551,101 @@
     renderThreadList(refs.reviewList, 'queue');
   }
 
+  function setPriorityLoading(isLoading) {
+    if (state.priorityLoading === isLoading) return;
+    state.priorityLoading = isLoading;
+    if (refs.priorityList) {
+      refs.priorityList.classList.toggle('is-loading', isLoading);
+    }
+    updatePriorityPill();
+    renderThreadList(refs.priorityList, 'priority');
+  }
+
+  function startPriorityPolling() {
+    if (state.priorityPolling) return;
+    state.priorityPolling = true;
+    schedulePriorityPoll(0);
+  }
+
+  function schedulePriorityPoll(delay = PRIORITY_POLL_INTERVAL_MS) {
+    if (!state.priorityPolling) return;
+    if (state.priorityPollTimer) {
+      window.clearTimeout(state.priorityPollTimer);
+    }
+    state.priorityPollTimer = window.setTimeout(() => {
+      void pollPriority();
+    }, delay);
+  }
+
+  async function pollPriority() {
+    try {
+      const resp = await fetch('/api/priority', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to load priority queue.');
+      }
+
+      const batchAt = parseTimestamp(data?.batchFinishedAt);
+      const hasNewBatch = batchAt && batchAt > state.priorityLastBatchAt;
+      const shouldApply = hasNewBatch ||
+        (state.priorityLoading && batchAt && state.prioritySyncStartAt && batchAt >= state.prioritySyncStartAt);
+
+      if (shouldApply) {
+        if (hasNewBatch) {
+          setPriorityLoading(true);
+        }
+        window.setTimeout(() => {
+          applyPriorityPayload(data);
+          if (batchAt) {
+            state.priorityLastBatchAt = batchAt;
+          }
+          if (state.prioritySyncStartAt && batchAt && batchAt >= state.prioritySyncStartAt) {
+            state.prioritySyncStartAt = 0;
+            clearPrioritySyncStart();
+          }
+          setPriorityLoading(false);
+        }, hasNewBatch ? PRIORITY_LOADING_MIN_MS : 0);
+      }
+    } catch (err) {
+      logDebug('priority poll failed', err);
+    } finally {
+      schedulePriorityPoll();
+    }
+  }
+
+  function applyPriorityPayload(payload) {
+    const priorityItems = normalizePriorityItems(Array.isArray(payload?.priority) ? payload.priority : null);
+    if (priorityItems) {
+      state.prioritySource = 'server';
+      state.priority = priorityItems.map(item => item.threadId);
+      state.priorityMeta.clear();
+      priorityItems.forEach(item => {
+        state.priorityMeta.set(item.threadId, {
+          score: item.score,
+          reason: item.reason,
+          reasonWeight: item.reasonWeight
+        });
+      });
+    }
+
+    const incoming = Array.isArray(payload?.threads)
+      ? payload.threads.map(normalizeThread).filter(Boolean)
+      : [];
+    if (incoming.length) {
+      appendThreads(incoming);
+    }
+
+    updateHeaderCount();
+    updateProgress();
+    updatePriorityPill();
+    updateQueuePill();
+    updateDrawerLists();
+  }
+
   function getThreadListIds(variant) {
     if (variant === 'priority') return state.priority;
     return state.needs;
@@ -1503,9 +1656,16 @@
     listEl.innerHTML = '';
 
     const ids = getThreadListIds(variant);
+    if (variant === 'priority' && state.priorityLoading) {
+      const li = document.createElement('li');
+      li.className = 'queue-loading priority-loading';
+      li.innerHTML = '<span class="priority-spinner" aria-hidden="true"></span><span>Prioritizing inbox…</span>';
+      listEl.appendChild(li);
+    }
+
     if (ids.length) {
       ids.forEach(id => appendThreadItem(listEl, id, variant));
-    } else {
+    } else if (!state.priorityLoading || variant !== 'priority') {
       const li = document.createElement('li');
       li.className = variant === 'queue' ? 'queue-empty drawer-empty' : 'drawer-empty';
       if (variant === 'priority') {

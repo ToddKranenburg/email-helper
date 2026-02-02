@@ -200,6 +200,10 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const threads = await buildThreadsPayload(userId, pageData.items);
   const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
+  const latestPriorityBatch = await prisma.prioritizationBatch.findFirst({
+    where: { userId, status: 'completed', finishedAt: { not: null } },
+    orderBy: { finishedAt: 'desc' }
+  });
   const priorityThreads = priorityQueue.items.length
     ? await buildThreadsPayload(userId, priorityQueue.items)
     : [];
@@ -214,7 +218,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     hasMore: pageData.hasMore,
     nextPage: pageData.nextPage
   };
-  const withFlag = `${render(body, mergedThreads, pageMeta, priorityQueue.priority)}
+  const withFlag = `${render(body, mergedThreads, pageMeta, priorityQueue.priority, latestPriorityBatch?.finishedAt ?? null)}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
@@ -835,6 +839,36 @@ router.get('/api/threads', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/api/priority', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  if (ensureScopesForApi(sessionData, res)) return;
+  if (await ensureRefreshTokenForApi(sessionData, res)) return;
+  const userId = sessionData.user.id;
+  try {
+    const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
+    const priorityThreads = priorityQueue.items.length
+      ? await buildThreadsPayload(userId, priorityQueue.items)
+      : [];
+    const latestPriorityBatch = await prisma.prioritizationBatch.findFirst({
+      where: { userId, status: 'completed', finishedAt: { not: null } },
+      orderBy: { finishedAt: 'desc' }
+    });
+    return res.json({
+      priority: priorityQueue.priority,
+      threads: priorityThreads,
+      batchFinishedAt: latestPriorityBatch?.finishedAt
+        ? latestPriorityBatch.finishedAt.toISOString()
+        : null
+    });
+  } catch (err) {
+    if (handleMissingScopeError(err, sessionData, res)) return;
+    return res.status(500).json({ error: 'Unable to load priority queue right now. Please try again.' });
+  }
+});
+
 router.post('/api/archive', async (req: Request, res: Response) => {
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) {
@@ -1033,15 +1067,27 @@ function emojiForCategory(cat: string): string {
   return '📎';
 }
 
-function render(tpl: string, items: SecretaryThread[], meta: PageMeta, priority: PriorityEntry[]) {
-  const secretaryScript = renderSecretaryAssistant(items, meta, priority);
+function render(
+  tpl: string,
+  items: SecretaryThread[],
+  meta: PageMeta,
+  priority: PriorityEntry[],
+  priorityBatchFinishedAt: Date | null
+) {
+  const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityBatchFinishedAt);
   return `${tpl}\n${secretaryScript}`;
 }
 
-function renderSecretaryAssistant(items: SecretaryThread[], meta: PageMeta, priority: PriorityEntry[]) {
+function renderSecretaryAssistant(
+  items: SecretaryThread[],
+  meta: PageMeta,
+  priority: PriorityEntry[],
+  priorityBatchFinishedAt: Date | null
+) {
   const payload = safeJson({
     threads: items,
     priority,
+    priorityBatchFinishedAt: priorityBatchFinishedAt ? priorityBatchFinishedAt.toISOString() : null,
     maxTurns: MAX_CHAT_TURNS,
     totalItems: meta.totalItems,
     pageSize: meta.pageSize,
