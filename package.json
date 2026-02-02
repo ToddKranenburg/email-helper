@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server.ts",
+    "dev:init": "npm install && npm run db:up && npm run dev:reset",
     "dev:reset": "npm run db:reset && npm run dev",
     "db:reset": "npx prisma migrate reset --force",
     "db:up": "docker-compose up -d",

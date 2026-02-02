@@ -567,7 +567,7 @@
       if (state.activeId && state.lookup.has(state.activeId)) {
         updateEmailCard(state.lookup.get(state.activeId));
       }
-      if (!state.activeId && state.needs.length) {
+      if (!state.activeId && state.needs.length && reason !== 'auto') {
         setActiveThread(state.needs[0]);
       }
       return added;
@@ -1855,7 +1855,7 @@
       }
       return;
     }
-    const nextId = getNextUnreviewedAfter(threadId);
+    const nextId = getNextUnreviewedAfter(threadId, { startIndex: index, allowWrap: !state.hasMore });
     if (nextId) {
       setActiveThread(nextId);
       return;
@@ -1874,7 +1874,7 @@
     toggleComposer(false);
     const added = await fetchNextPage('auto');
     if (added.length) {
-      const nextId = state.needs.find(id => !reviewedIds.has(id));
+      const nextId = added.find(id => !reviewedIds.has(id)) || added[0];
       if (nextId) {
         setActiveThread(nextId);
         return;
@@ -1893,6 +1893,10 @@
     if (!threadId || !state.needs.length) return;
     const index = state.needs.indexOf(threadId);
     if (index === -1) return;
+    if (index === state.needs.length - 1 && state.hasMore) {
+      autoLoadNextBatch();
+      return;
+    }
     const nextIndex = state.needs.length > 1 ? (index + 1) % state.needs.length : -1;
     const nextId = nextIndex >= 0 ? state.needs[nextIndex] : '';
     if (nextId && nextId !== threadId) {
@@ -1912,7 +1916,7 @@
     updateQueuePill();
     closeTaskPanel(true);
     clearPendingSuggestedAction(threadId);
-    const nextId = getNextUnreviewedAfter(threadId);
+    const nextId = getNextUnreviewedAfter(threadId, { startIndex: index + 1, allowWrap: !state.hasMore });
     if (nextId) {
       setActiveThread(nextId);
       return;
@@ -1933,11 +1937,16 @@
     }
   }
 
-  function getNextUnreviewedAfter(threadId) {
+  function getNextUnreviewedAfter(threadId, options = {}) {
     if (!state.needs.length) return '';
-    const startIndex = Math.max(0, state.needs.indexOf(threadId) + 1);
-    for (let offset = 0; offset < state.needs.length; offset += 1) {
-      const index = (startIndex + offset) % state.needs.length;
+    const allowWrap = options.allowWrap !== undefined ? Boolean(options.allowWrap) : true;
+    const providedStart = Number.isInteger(options.startIndex) ? Number(options.startIndex) : null;
+    const startIndex = providedStart !== null
+      ? Math.max(0, providedStart)
+      : Math.max(0, state.needs.indexOf(threadId) + 1);
+    const maxOffset = allowWrap ? state.needs.length : Math.max(0, state.needs.length - startIndex);
+    for (let offset = 0; offset < maxOffset; offset += 1) {
+      const index = allowWrap ? (startIndex + offset) % state.needs.length : startIndex + offset;
       const candidate = state.needs[index];
       if (!reviewedIds.has(candidate)) return candidate;
     }
