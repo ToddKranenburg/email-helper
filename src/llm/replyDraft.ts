@@ -19,6 +19,16 @@ Rules:
 - Do not include a greeting or signature. The reply body should be ready to paste after a greeting.
 - Keep it under 120 words. Use plain text only (no markdown).`;
 
+const GUIDED_SYSTEM_PROMPT = `You draft short, warm, and terse email replies using the thread context plus the user's desired reply instructions.
+Output STRICT JSON: {"body":"...","confidence":0-1,"safe_to_draft":true|false,"reason":"short phrase"}.
+Rules:
+- Use the user's instruction as authoritative. Use the transcript for facts and context.
+- Be creative in phrasing (do not copy the user's words verbatim), while preserving meaning.
+- Never invent names, dates, numbers, commitments, or facts not in the transcript or user instruction.
+- If information is missing or ambiguous, ask one concise clarifying question instead of guessing.
+- Do not include a greeting or signature. The reply body should be ready to paste after a greeting.
+- Keep it under 120 words. Use plain text only (no markdown).`;
+
 const FALLBACK: ReplyDraftResult = {
   body: '',
   confidence: 0,
@@ -56,6 +66,37 @@ export async function generateReplyDraft(input: {
   return { ...FALLBACK, reason: 'Reply draft unavailable' };
 }
 
+export async function generateGuidedReplyDraft(input: {
+  subject: string;
+  headline?: string;
+  summary?: string;
+  nextStep?: string;
+  participants: string[];
+  transcript: string;
+  fromLine?: string;
+  userInstruction: string;
+}): Promise<ReplyDraftResult> {
+  const context = buildGuidedContext(input);
+  if (!openai) return FALLBACK;
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.4,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: GUIDED_SYSTEM_PROMPT },
+        { role: 'user', content: context }
+      ]
+    });
+    const raw = completion.choices[0]?.message?.content || '';
+    const parsed = parseReplyDraft(raw);
+    if (parsed) return parsed;
+  } catch (err) {
+    console.error('guided reply draft generation failed', err);
+  }
+  return { ...FALLBACK, reason: 'Guided reply draft unavailable' };
+}
+
 function buildContext(input: {
   subject: string;
   headline?: string;
@@ -72,6 +113,37 @@ function buildContext(input: {
   return `Subject: ${input.subject || '(no subject)'}
 Participants: ${participants}
 Sender line: ${input.fromLine || '(unknown sender)'}
+
+Thread (oldest to newest):
+${trimmedTranscript}`;
+}
+
+function buildGuidedContext(input: {
+  subject: string;
+  headline?: string;
+  summary?: string;
+  nextStep?: string;
+  participants: string[];
+  transcript: string;
+  fromLine?: string;
+  userInstruction: string;
+}) {
+  const participants = input.participants?.length ? input.participants.join(', ') : 'Unknown participants';
+  const trimmedTranscript = input.transcript?.length > 9000
+    ? input.transcript.slice(-9000)
+    : input.transcript || '(no transcript provided)';
+  const instruction = input.userInstruction?.trim() || '(no instruction provided)';
+  const headline = input.headline?.trim() || '';
+  const summary = input.summary?.trim() || '';
+  const nextStep = input.nextStep?.trim() || '';
+  const extraContext = [headline && `Headline: ${headline}`, summary && `Summary: ${summary}`, nextStep && `Next step: ${nextStep}`]
+    .filter(Boolean)
+    .join('\n');
+  return `Subject: ${input.subject || '(no subject)'}
+Participants: ${participants}
+Sender line: ${input.fromLine || '(unknown sender)'}
+User instruction: ${instruction}
+${extraContext ? `\n${extraContext}` : ''}
 
 Thread (oldest to newest):
 ${trimmedTranscript}`;

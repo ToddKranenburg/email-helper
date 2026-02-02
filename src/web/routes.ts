@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import type { Summary, Thread, ActionFlow } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
-import { generateReplyDraft } from '../llm/replyDraft.js';
+import { generateGuidedReplyDraft, generateReplyDraft } from '../llm/replyDraft.js';
 import {
   ensureAutoSummaryCards,
   fetchTimeline,
@@ -356,8 +356,10 @@ router.post('/secretary/reply-draft', async (req: Request, res: Response) => {
       fromLine: formatSender(context.summary.Thread)
     });
     const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
+    const signoffUser = await resolveUserForSignoff(sessionData);
+    const body = eligible ? appendReplySignoff(draft.body, signoffUser) : '';
     return res.json({
-      body: eligible ? draft.body : '',
+      body,
       confidence: draft.confidence,
       safe: draft.safeToDraft,
       suggested: eligible,
@@ -365,6 +367,48 @@ router.post('/secretary/reply-draft', async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('reply draft failed', err);
+    return res.status(500).json({ error: 'Unable to draft a reply right now.' });
+  }
+});
+
+router.post('/secretary/reply-intent-draft', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  if (ensureScopesForApi(sessionData, res)) return;
+  const threadId = typeof req.body?.threadId === 'string' ? req.body.threadId.trim() : '';
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!threadId) return res.status(400).json({ error: 'Missing thread id.' });
+  if (!text) return res.status(400).json({ error: 'Provide reply guidance.' });
+
+  const context = await loadThreadContext(sessionData.user.id, threadId, req);
+  if (!context) return res.status(404).json({ error: 'Email summary not found.' });
+  if (!context.transcript) return res.status(400).json({ error: 'Unable to load that email thread. Try re-ingesting your inbox.' });
+
+  try {
+    const draft = await generateGuidedReplyDraft({
+      subject: context.summary.Thread?.subject || '',
+      headline: context.summary.headline,
+      summary: context.summary.tldr,
+      nextStep: context.summary.nextStep,
+      participants: context.participants,
+      transcript: context.transcript,
+      fromLine: formatSender(context.summary.Thread),
+      userInstruction: text
+    });
+    const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
+    const signoffUser = await resolveUserForSignoff(sessionData);
+    const body = eligible ? appendReplySignoff(draft.body, signoffUser) : '';
+    return res.json({
+      body,
+      confidence: draft.confidence,
+      safe: draft.safeToDraft,
+      suggested: eligible,
+      reason: draft.reason
+    });
+  } catch (err) {
+    console.error('reply intent draft failed', err);
     return res.status(500).json({ error: 'Unable to draft a reply right now.' });
   }
 });
@@ -1092,6 +1136,40 @@ function normalizeDraftInput(raw: any): { title: string; notes: string; dueDate:
 function normalizeReplyBody(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   return raw.replace(/\r\n/g, '\n').trim();
+}
+
+function deriveFirstName(name?: string | null, email?: string | null): string {
+  const cleanName = typeof name === 'string' ? name.replace(/["<>]/g, '').trim() : '';
+  if (cleanName) {
+    const first = cleanName.split(/\s+/)[0];
+    if (first) return first;
+  }
+  const cleanEmail = typeof email === 'string' ? email.trim() : '';
+  if (!cleanEmail || !cleanEmail.includes('@')) return '';
+  const local = cleanEmail.split('@')[0] || '';
+  const chunk = local.split(/[._-]+/).filter(Boolean)[0] || '';
+  if (!chunk) return '';
+  return chunk.charAt(0).toUpperCase() + chunk.slice(1);
+}
+
+function appendReplySignoff(body: string, user?: { name?: string | null; email?: string | null } | null): string {
+  const trimmed = String(body || '').trim();
+  if (!trimmed) return '';
+  const firstName = deriveFirstName(user?.name ?? null, user?.email ?? null);
+  if (!firstName) return trimmed;
+  return `${trimmed}\n\n${firstName}`;
+}
+
+async function resolveUserForSignoff(sessionData: any): Promise<{ name?: string | null; email?: string | null } | null> {
+  const sessionUser = sessionData?.user;
+  const hasName = typeof sessionUser?.name === 'string' && sessionUser.name.trim();
+  const hasEmail = typeof sessionUser?.email === 'string' && sessionUser.email.trim();
+  if (hasName || hasEmail) return { name: sessionUser?.name ?? null, email: sessionUser?.email ?? null };
+  const userId = typeof sessionUser?.id === 'string' ? sessionUser.id : '';
+  if (!userId) return null;
+  const dbUser = await prisma.user.findUnique({ where: { id: userId } });
+  if (!dbUser) return null;
+  return { name: dbUser.name ?? null, email: dbUser.email ?? null };
 }
 
 async function fetchReplyMetadata(gmail: ReturnType<typeof gmailClient>, messageId: string) {

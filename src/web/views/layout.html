@@ -1077,6 +1077,7 @@
       display: flex;
       flex-direction: column;
       gap: 6px;
+      position: relative;
     }
     .reply-field label {
       font-size: 13px;
@@ -1098,6 +1099,38 @@
       background: #fff;
       min-height: 110px;
       resize: vertical;
+    }
+    .reply-field.drafting textarea {
+      background: linear-gradient(120deg, #fff 0%, #f4f6ff 45%, #fff 90%);
+      background-size: 220% 100%;
+      animation: replyShimmer 1.4s ease-in-out infinite;
+    }
+    .reply-field.drafting::after {
+      content: "Drafting";
+      position: absolute;
+      right: 16px;
+      bottom: 14px;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(255,255,255,0.9);
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px dashed var(--border);
+      pointer-events: none;
+    }
+    .reply-field.drafting::before {
+      content: "";
+      position: absolute;
+      right: 72px;
+      bottom: 22px;
+      width: 18px;
+      height: 4px;
+      border-radius: 999px;
+      background: radial-gradient(circle, var(--muted) 30%, transparent 35%) 0 0/6px 4px;
+      animation: replyDots 1s steps(3, end) infinite;
+      pointer-events: none;
     }
     .reply-error {
       margin: 0;
@@ -1141,6 +1174,16 @@
     .reply-panel.loading button {
       pointer-events: none;
       opacity: 0.7;
+    }
+    @keyframes replyShimmer {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    @keyframes replyDots {
+      0% { background-position: 0 0; opacity: 0.4; }
+      50% { background-position: 6px 0; opacity: 0.8; }
+      100% { background-position: 12px 0; opacity: 0.4; }
     }
     .chat-error {
       color: #d64545;

@@ -1006,6 +1006,13 @@
 
     const disabled = replyState.status === 'sending';
     refs.replyBody.disabled = disabled;
+    const replyField = refs.replyBody.closest('.reply-field');
+    if (replyField) replyField.classList.toggle('drafting', replyState.suggesting);
+    if (replyState.suggesting && !(replyState.values.body || '').trim()) {
+      refs.replyBody.setAttribute('placeholder', 'Weaving a reply…');
+    } else {
+      refs.replyBody.setAttribute('placeholder', 'Type your reply…');
+    }
     if (refs.replySubmit) {
       refs.replySubmit.disabled = disabled;
       refs.replySubmit.textContent = disabled ? 'Sending…' : 'Send reply';
@@ -1150,6 +1157,59 @@
     }
   }
 
+  async function requestReplyIntentDraft(threadId, userText) {
+    if (!threadId || replyState.suggesting) return;
+    const prompt = typeof userText === 'string' ? userText.trim() : '';
+    if (!prompt) return;
+    replyState.suggesting = true;
+    renderReplyPanel();
+    let shouldFallback = false;
+    try {
+      const resp = await fetch('/secretary/reply-intent-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ threadId, text: prompt })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        if (resp.status === 403 && data?.error) {
+          replyState.error = data.error;
+          replyState.status = 'error';
+          return;
+        }
+        console.warn('Reply intent draft unavailable', { status: resp.status, error: data?.error });
+        shouldFallback = true;
+        return;
+      }
+      const suggestion = typeof data?.body === 'string' ? data.body.trim() : '';
+      const shouldApply = Boolean(data?.suggested && suggestion);
+      if (!shouldApply) {
+        shouldFallback = true;
+        return;
+      }
+      if (!replyState.open || replyState.lastSourceId !== threadId) return;
+      const current = (replyState.values.body || '').trim();
+      const base = (replyState.baseBody || '').trim();
+      if (current && current !== base) return;
+      replyState.values.body = mergeReplyBody(replyState.baseBody || '', suggestion);
+      replyState.suggested = suggestion;
+      renderReplyPanel();
+    } catch (err) {
+      console.warn('Reply intent draft failed', err);
+      shouldFallback = true;
+    } finally {
+      replyState.suggesting = false;
+      renderReplyPanel();
+    }
+    if (shouldFallback) {
+      replyState.error = '';
+      replyState.status = 'idle';
+      renderReplyPanel();
+      await requestReplyDraft(threadId);
+    }
+  }
+
   function mergeReplyBody(base, suggestion) {
     const baseText = String(base || '').replace(/\s+$/, '');
     const suggestionText = String(suggestion || '').trim();
@@ -1159,12 +1219,12 @@
   }
 
   function openReplyPanelFromPrompt(userText) {
-    const prefill = extractReplyBodyFromPrompt(userText);
-    if (prefill) {
-      openReplyPanel({ prefillBody: prefill, skipSuggestion: true });
-      return;
+    const prompt = typeof userText === 'string' ? userText.trim() : '';
+    const useGuided = shouldUseGuidedReply(prompt);
+    openReplyPanel({ skipSuggestion: useGuided });
+    if (useGuided && state.activeId) {
+      requestReplyIntentDraft(state.activeId, prompt);
     }
-    openReplyPanel();
   }
 
   function extractReplyBodyFromPrompt(rawText) {
@@ -1228,6 +1288,31 @@
       body = `${body}.`;
     }
     return body;
+  }
+
+  function shouldUseGuidedReply(rawText) {
+    const raw = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!raw) return false;
+    const cleaned = raw.replace(/[.!?]/g, '').trim().toLowerCase();
+    const shortCommands = new Set([
+      'reply',
+      'reply back',
+      'reply to',
+      'respond',
+      'respond to',
+      'send a reply',
+      'send a response',
+      'draft a reply',
+      'write back',
+      'email back',
+      'answer them'
+    ]);
+    if (shortCommands.has(cleaned)) return false;
+    if (extractReplyBodyFromPrompt(raw)) return true;
+    if (/["']/.test(raw)) return true;
+    if (/(tell|say|ask|let)\s+(him|her|them)\b/i.test(raw)) return true;
+    if (/(reply|respond|email back|write back)\b/i.test(raw) && raw.length > 20) return true;
+    return false;
   }
 
   async function submitReply(event) {

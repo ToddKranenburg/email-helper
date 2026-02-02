@@ -20,6 +20,12 @@ export const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/tasks'
 ] as const;
 
+const PROFILE_SCOPES = [
+  'openid',
+  'email',
+  'profile'
+] as const;
+
 function parseScopes(raw: string | undefined | null): string[] {
   if (!raw) return [];
   return raw
@@ -29,7 +35,7 @@ function parseScopes(raw: string | undefined | null): string[] {
 }
 
 const ENV_SCOPES = parseScopes(process.env.GOOGLE_SCOPES);
-const REQUESTED_SCOPES = Array.from(new Set([...GMAIL_SCOPES, ...ENV_SCOPES]));
+const REQUESTED_SCOPES = Array.from(new Set([...GMAIL_SCOPES, ...PROFILE_SCOPES, ...ENV_SCOPES]));
 const SCOPES = [...REQUESTED_SCOPES];
 
 export class MissingScopeError extends Error {
@@ -54,14 +60,24 @@ export function getMissingGmailScopes(tokens: { scope?: string | string[] } | nu
   const grantedScopes = parseGrantedScopes(tokens?.scope);
   if (!grantedScopes.length) return [...REQUESTED_SCOPES];
   const scopeSet = new Set(grantedScopes);
-  return REQUESTED_SCOPES.filter(scope => !scopeSet.has(scope));
+  const hasAny = (values: string[]) => values.some(value => scopeSet.has(value));
+  return REQUESTED_SCOPES.filter(scope => {
+    if (scope === 'email') {
+      return !hasAny(['email', 'https://www.googleapis.com/auth/userinfo.email']);
+    }
+    if (scope === 'profile') {
+      return !hasAny(['profile', 'https://www.googleapis.com/auth/userinfo.profile']);
+    }
+    return !scopeSet.has(scope);
+  });
 }
 
 authRouter.get('/google', (req: Request, res: Response) => {
   const url = sharedClient.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
-    prompt: 'consent'
+    prompt: 'consent',
+    include_granted_scopes: true
   });
   res.redirect(url);
 });
@@ -72,7 +88,23 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
   const { tokens } = await oauthClient.getToken(code);
   oauthClient.setCredentials(tokens);
 
-  const missingScopes = getMissingGmailScopes(tokens);
+  let missingScopes = getMissingGmailScopes(tokens);
+  if (missingScopes.length && tokens.access_token) {
+    try {
+      const tokenInfo = await oauthClient.getTokenInfo(tokens.access_token);
+      const infoScopes = Array.isArray(tokenInfo?.scopes)
+        ? tokenInfo.scopes
+        : typeof tokenInfo?.scope === 'string'
+          ? tokenInfo.scope.split(/\s+/).map(s => s.trim()).filter(Boolean)
+          : [];
+      if (infoScopes.length) {
+        tokens.scope = infoScopes.join(' ');
+        missingScopes = getMissingGmailScopes(tokens);
+      }
+    } catch (err) {
+      console.warn('Failed to verify token scopes', err);
+    }
+  }
   if (missingScopes.length) {
     console.error('User did not grant the required Gmail scopes', {
       missingScopes,
@@ -90,14 +122,25 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
     return res.status(400).send('Unable to retrieve Gmail profile information.');
   }
 
+  let profileName: string | null = null;
+  let profilePicture: string | null = null;
+  try {
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauthClient });
+    const { data: userInfo } = await oauth2.userinfo.get();
+    profileName = typeof userInfo?.name === 'string' ? userInfo.name.trim() : null;
+    profilePicture = typeof userInfo?.picture === 'string' ? userInfo.picture.trim() : null;
+  } catch (err) {
+    console.warn('Unable to fetch Google profile info', err);
+  }
+
   const existingUser = await prisma.user.findUnique({ where: { email } });
   const userId = existingUser?.id ?? email;
 
   const userPayload = {
     id: userId,
     email,
-    name: existingUser?.name ?? null,
-    picture: existingUser?.picture ?? null
+    name: profileName || (existingUser?.name ?? null),
+    picture: profilePicture || (existingUser?.picture ?? null)
   };
 
   await prisma.user.upsert({
