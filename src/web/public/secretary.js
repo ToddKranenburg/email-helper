@@ -639,7 +639,7 @@
         clearPendingCreate();
         if (data?.status === 'created') {
           await waitForAssistantSettled(threadId);
-          advanceToNextThread(threadId);
+          promptArchiveAfterTask(null, { includeSuccess: false, threadId });
         }
       }
       clearPendingSuggestedAction(threadId);
@@ -1427,7 +1427,7 @@
       }
       await waitForAssistantSettled(threadId);
       if (state.activeId === threadId) {
-        skipCurrent('reply');
+        promptArchiveAfterReply({ threadId });
       }
       result = { ok: true };
     } catch (err) {
@@ -3103,8 +3103,8 @@
   }
 
   function promptArchiveAfterTask(result, options = {}) {
-    if (!state.activeId) return;
-    const threadId = state.activeId;
+    const threadId = options.threadId || state.activeId;
+    if (!threadId) return;
     const includeSuccess = Boolean(options.includeSuccess);
     setPendingArchive(threadId);
     if (includeSuccess) {
@@ -3112,6 +3112,14 @@
     }
     const prompt = 'Archive this email and move on? I can keep it here if you want.';
     enqueueAssistantMessage(threadId, prompt);
+    updateHint(threadId);
+  }
+
+  function promptArchiveAfterReply(options = {}) {
+    const threadId = options.threadId || state.activeId;
+    if (!threadId) return;
+    setPendingArchive(threadId);
+    enqueueAssistantMessage(threadId, 'Archive this email and move on? I can keep it here if you want.');
     updateHint(threadId);
   }
 
