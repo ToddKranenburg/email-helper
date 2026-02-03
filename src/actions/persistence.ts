@@ -106,9 +106,18 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
     transcript: ctx.transcript
   });
 
-  let actionType: ActionType = generated.suggestedAction?.actionType || 'skip';
-  let externalAction = generated.suggestedAction?.externalAction || null;
-  let prompt = generated.suggestedAction?.userFacingPrompt
+  let suggestedActions = Array.isArray(generated.suggestedActions) && generated.suggestedActions.length
+    ? generated.suggestedActions
+    : generated.suggestedAction
+      ? [generated.suggestedAction]
+      : [];
+  if (!suggestedActions.length) {
+    suggestedActions = [{ actionType: 'skip', userFacingPrompt: 'Skip for now and move to the next email?' }];
+  }
+
+  let actionType: ActionType = suggestedActions[0]?.actionType || 'skip';
+  let externalAction = suggestedActions[0]?.externalAction || null;
+  let prompt = suggestedActions[0]?.userFacingPrompt
     || (actionType === 'external_action'
       ? 'This needs your attention outside the app. Here are the key links.'
       : actionType === 'reply'
@@ -128,6 +137,19 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
     actionType = 'unsubscribe';
     externalAction = null;
     prompt = 'Unsubscribe from this sender to stop these promos?';
+    suggestedActions = [{ actionType, userFacingPrompt: prompt, externalAction: null }];
+  }
+
+  if (suggestedActions.some(action => action.actionType === 'external_action')) {
+    const externalOnly = suggestedActions.find(action => action.actionType === 'external_action');
+    suggestedActions = externalOnly ? [externalOnly] : suggestedActions;
+    actionType = suggestedActions[0]?.actionType || actionType;
+    externalAction = suggestedActions[0]?.externalAction || externalAction;
+    prompt = suggestedActions[0]?.userFacingPrompt || prompt;
+  }
+
+  if (suggestedActions.length > 1) {
+    prompt = 'Recommended sequence:';
   }
 
   const result = await prisma.$transaction(async tx => {
@@ -166,7 +188,7 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
         threadId: ctx.threadId,
         type: 'suggested_action',
         content: prompt,
-        payload: packPayload({ actionType, externalAction })
+        payload: packPayload({ actionType, externalAction, suggestedActions })
       }
     });
 

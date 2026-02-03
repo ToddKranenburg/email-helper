@@ -2229,6 +2229,28 @@
     return '';
   }
 
+  function normalizeSuggestedActionsPayload(payload, fallbackPrompt) {
+    const raw = payload?.suggestedActions || payload?.suggested_actions;
+    if (Array.isArray(raw)) {
+      return raw.map(entry => {
+        const actionType = normalizeActionType(entry?.actionType || entry?.action_type);
+        if (!actionType) return null;
+        return {
+          actionType,
+          userFacingPrompt: typeof entry?.userFacingPrompt === 'string' ? entry.userFacingPrompt.trim() : '',
+          externalAction: entry?.externalAction || entry?.external_action || null
+        };
+      }).filter(Boolean);
+    }
+    const actionType = normalizeActionType(payload?.actionType);
+    if (!actionType) return [];
+    return [{
+      actionType,
+      userFacingPrompt: typeof fallbackPrompt === 'string' ? fallbackPrompt.trim() : '',
+      externalAction: payload?.externalAction || payload?.external_action || null
+    }];
+  }
+
   function guessSuggestedAction(thread) {
     const next = normalizeSuggestedAction(actionFromNextStep(thread?.nextStep));
     if (next) return next;
@@ -2526,9 +2548,15 @@
       return '';
     }
     if (entry.messageType === 'suggested_action') {
-      const actionType = normalizeActionType(entry?.payload?.actionType);
-      if (actionType === 'external_action') {
-        const externalAction = normalizeExternalActionPayload(entry?.payload?.externalAction || entry?.payload?.external_action);
+      const suggestedActions = normalizeSuggestedActionsPayload(entry?.payload, entry?.content);
+      const primaryAction = suggestedActions[0];
+      const primaryType = normalizeActionType(primaryAction?.actionType || entry?.payload?.actionType);
+      if (primaryType === 'external_action') {
+        const externalAction = normalizeExternalActionPayload(
+          primaryAction?.externalAction
+          || entry?.payload?.externalAction
+          || entry?.payload?.external_action
+        );
         const steps = externalAction?.steps || entry.content || '';
         const linksMarkup = renderExternalLinks(externalAction?.links || []);
         return `<div class="chat-message assistant">
@@ -2539,20 +2567,35 @@
           </div>
         </div>`;
       }
-      const agenticType = normalizeSuggestedAction(actionType) || '';
       const thread = state.lookup.get(entry.threadId);
       const canUnsubscribe = Boolean(thread?.unsubscribe?.supported);
-      const disabled = (actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip')
-        || (agenticType === 'unsubscribe' && !canUnsubscribe);
+      const disableAll = actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip';
+      const agenticType = normalizeSuggestedAction(primaryAction?.actionType || primaryType) || '';
+      const disabled = disableAll || (agenticType === 'unsubscribe' && !canUnsubscribe);
       const label = suggestedActionLabel(agenticType);
+      const hint = '<span class="suggested-enter-hint" aria-hidden="true">⏎</span>';
+      let messageHtml = '';
+      if (suggestedActions.length > 1) {
+        const listItems = suggestedActions
+          .map(action => {
+            const prompt = typeof action?.userFacingPrompt === 'string' ? action.userFacingPrompt.trim() : '';
+            if (!prompt) return '';
+            return `<li>${renderPlainText(prompt, { preserveLineBreaks: true })}</li>`;
+          })
+          .filter(Boolean)
+          .join('');
+        messageHtml = `<p class="suggested-copy">Recommended sequence:</p><ol class="suggested-sequence">${listItems}</ol>`;
+      } else {
+        messageHtml = `<p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>`;
+      }
       return `<div class="chat-message assistant">
         <div class="assistant-avatar" aria-hidden="true">S</div>
         <div class="chat-card">
-          <p class="suggested-copy">${renderPlainText(entry.content, { preserveLineBreaks: true })}</p>
+          ${messageHtml}
         </div>
       </div>
       <div class="suggested-action-row" role="group" aria-label="Suggested action">
-        <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(agenticType)}" ${disabled ? 'disabled' : ''}>${label}<span class="suggested-enter-hint" aria-hidden="true">⏎</span></button>
+        <button type="button" class="suggested-btn" data-action="suggested-primary" data-thread-id="${escapeAttribute(entry.threadId)}" data-action-type="${escapeAttribute(agenticType)}" ${disabled ? 'disabled' : ''}>${label}${hint}</button>
       </div>`;
     }
     if (entry.messageType === 'draft_details') {
@@ -2799,7 +2842,9 @@
       if (mustKnow) state.mustKnowByThread.set(threadId, mustKnow);
     }
     if (entry.messageType === 'suggested_action') {
-      const suggested = normalizeSuggestedAction(entry?.payload?.actionType);
+      const suggestedActions = normalizeSuggestedActionsPayload(entry?.payload, entry?.content);
+      const primary = suggestedActions[0]?.actionType || entry?.payload?.actionType;
+      const suggested = normalizeSuggestedAction(primary);
       if (suggested) setPendingSuggestedAction(threadId, suggested);
     }
     if (entry.messageType === 'draft_details') {

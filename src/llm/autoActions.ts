@@ -10,6 +10,7 @@ export type SuggestedActionPayload = {
 export type AutoSummaryResult = {
   mustKnow: string;
   suggestedAction: SuggestedActionPayload;
+  suggestedActions: SuggestedActionPayload[];
 };
 
 export type TaskDraft = {
@@ -22,21 +23,21 @@ const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
-const AUTO_SUMMARY_PROMPT = `You summarize email threads for a busy professional and propose ONE next action.
+const AUTO_SUMMARY_PROMPT = `You summarize email threads for a busy professional and propose a short ordered sequence of actions.
 Output STRICT JSON:
-{"must_know":"<plain text essentials only>","action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|REPLY|EXTERNAL_ACTION|UNSUBSCRIBE|NONE","suggested_action":{"userFacingPrompt":"<concise action prompt>"},"external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}
+{"must_know":"<plain text essentials only>","suggested_actions":[{"action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|REPLY|EXTERNAL_ACTION|UNSUBSCRIBE|NONE","userFacingPrompt":"<concise action prompt>","external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}]}
 Rules:
 - "must_know": concise, essential content only (no actions, no emojis, no markdown).
-- "action_type": choose ONE. Prefer ARCHIVE when no action is needed. Use NONE only for truly ignorable content.
-- "suggested_action.userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO/REPLY/UNSUBSCRIBE. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
-- "external_action": only include when action_type is EXTERNAL_ACTION.
+- "suggested_actions": 1-3 items, in the exact order the user should do them. Prefer ARCHIVE when no action is needed. Use NONE only for truly ignorable content.
+- "suggested_actions[].userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO/REPLY/UNSUBSCRIBE. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
+- "suggested_actions[].external_action": only include when action_type is EXTERNAL_ACTION.
 - EXTERNAL_ACTION is for meaningful user actions outside the app (security alerts, verification, compliance, account lock risk, past-due notices, required RSVP/forms). Marketing/promotional CTAs like “buy now”, “upgrade”, “shop” must NOT trigger EXTERNAL_ACTION.
 - CREATE_TASK is only for reminders when the email cannot be resolved immediately and the user should handle it later (future follow-ups, deadlines, planned check-ins). If there is a direct link to take action now (review budget, verify account, RSVP, submit form), prefer EXTERNAL_ACTION.
 - REPLY is for straightforward responses the user can handle by email without external steps.
 - UNSUBSCRIBE is only for promotional/bulk email that clearly provides a list-unsubscribe option.
-- "external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
-- "external_action.links": 1-3 items. Prefer explicit account/security/action URLs from the email. Avoid generic homepage links.
-- If action_type is NONE, omit suggested_action and external_action.`;
+- "suggested_actions[].external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
+- "suggested_actions[].external_action.links": 1-3 items. Prefer explicit account/security/action URLs from the email. Avoid generic homepage links.
+- If action_type is NONE, still include it in suggested_actions with a brief userFacingPrompt.`;
 
 const TASK_DRAFT_PROMPT = `You draft Google Tasks from an email thread.
 Output STRICT JSON: {"title":"...","notes":"...","dueDate":"YYYY-MM-DD or null"}
@@ -133,29 +134,12 @@ function parseAutoSummary(payload: string): AutoSummaryResult | null {
   const safe = extractJson(payload);
   if (!safe) return null;
   const mustKnow = normalizeText(safe.must_know || safe.mustKnow || safe.mustknow);
-  const actionType = normalizeActionType(
-    safe?.action_type ||
-      safe?.actionType ||
-      safe?.suggested_action?.actionType ||
-      safe?.suggested_action?.action_type
-  );
-  const normalizedExternal = normalizeExternalAction(safe?.external_action || safe?.externalAction);
-  const externalAction = actionType === 'external_action' ? normalizedExternal : null;
-  let prompt = normalizeText(safe?.suggested_action?.userFacingPrompt || safe?.suggested_action?.prompt);
-  if (!prompt && actionType) {
-    if (actionType === 'external_action') {
-      prompt = normalizeText(externalAction?.steps);
-    } else {
-      prompt = actionPrompt(actionType);
-    }
-  }
-  if (actionType === 'archive' && prompt && !/\barchive\b/i.test(prompt)) {
-    prompt = actionPrompt('archive');
-  }
-  if (!mustKnow || !actionType || !prompt) return null;
+  const suggestedActions = normalizeSuggestedActions(safe);
+  if (!mustKnow || !suggestedActions.length) return null;
   return {
     mustKnow,
-    suggestedAction: { actionType, userFacingPrompt: prompt, externalAction }
+    suggestedAction: suggestedActions[0],
+    suggestedActions
   };
 }
 
@@ -178,7 +162,8 @@ function fallbackAutoSummary(input: {
 }): AutoSummaryResult {
   const mustKnow = normalizeText(input.summary || input.headline || input.subject || 'New email in your inbox.');
   const prompt = actionPrompt('skip');
-  return { mustKnow, suggestedAction: { actionType: 'skip', userFacingPrompt: prompt } };
+  const action = { actionType: 'skip', userFacingPrompt: prompt };
+  return { mustKnow, suggestedAction: action, suggestedActions: [action] };
 }
 
 function fallbackDraft(input: { subject: string; headline: string; summary: string; nextStep: string }): TaskDraft {
@@ -201,6 +186,80 @@ function extractJson(payload: string) {
   } catch {
     return null;
   }
+}
+
+function normalizeSuggestedActions(raw: any): SuggestedActionPayload[] {
+  const fromArray = Array.isArray(raw?.suggested_actions || raw?.suggestedActions)
+    ? (raw.suggested_actions || raw.suggestedActions)
+    : null;
+  const topLevelExternal = normalizeExternalAction(raw?.external_action || raw?.externalAction);
+
+  const actions: SuggestedActionPayload[] = [];
+  if (fromArray) {
+    for (const entry of fromArray) {
+      const normalized = normalizeSuggestedActionEntry(entry);
+      if (normalized) actions.push(normalized);
+    }
+  }
+
+  if (!actions.length) {
+    const actionType = normalizeActionType(
+      raw?.action_type ||
+        raw?.actionType ||
+        raw?.suggested_action?.actionType ||
+        raw?.suggested_action?.action_type
+    );
+    const prompt = normalizeText(raw?.suggested_action?.userFacingPrompt || raw?.suggested_action?.prompt);
+    const externalAction = actionType === 'external_action' ? topLevelExternal : null;
+    const fallback = buildSuggestedAction(actionType, prompt, externalAction);
+    if (fallback) actions.push(fallback);
+  }
+
+  const deduped = dedupeSuggestedActions(actions).slice(0, 3);
+  const externalOnly = deduped.find(action => action.actionType === 'external_action');
+  if (externalOnly) return [externalOnly];
+  return deduped;
+}
+
+function normalizeSuggestedActionEntry(entry: any): SuggestedActionPayload | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const actionType = normalizeActionType(entry.action_type || entry.actionType);
+  const prompt = normalizeText(entry.userFacingPrompt || entry.prompt);
+  const externalAction = actionType === 'external_action'
+    ? normalizeExternalAction(entry.external_action || entry.externalAction)
+    : null;
+  return buildSuggestedAction(actionType, prompt, externalAction);
+}
+
+function buildSuggestedAction(
+  actionType: ActionType | null,
+  prompt: string,
+  externalAction: ExternalActionPayload | null
+): SuggestedActionPayload | null {
+  if (!actionType) return null;
+  let finalPrompt = prompt;
+  if (!finalPrompt) {
+    if (actionType === 'external_action') {
+      finalPrompt = normalizeText(externalAction?.steps);
+    } else {
+      finalPrompt = actionPrompt(actionType);
+    }
+  }
+  if (!finalPrompt) return null;
+  if (actionType === 'archive' && !/\barchive\b/i.test(finalPrompt)) {
+    finalPrompt = actionPrompt('archive');
+  }
+  if (actionType === 'external_action' && !externalAction?.steps) return null;
+  return { actionType, userFacingPrompt: finalPrompt, externalAction };
+}
+
+function dedupeSuggestedActions(actions: SuggestedActionPayload[]) {
+  const seen = new Set<ActionType>();
+  return actions.filter(action => {
+    if (seen.has(action.actionType)) return false;
+    seen.add(action.actionType);
+    return true;
+  });
 }
 
 function normalizeText(value: unknown) {
