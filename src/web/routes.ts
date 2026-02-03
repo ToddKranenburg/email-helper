@@ -9,6 +9,7 @@ import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryC
 import { gmailClient } from '../gmail/client.js';
 import { getAuthedClient, getMissingGmailScopes, MissingScopeError } from '../auth/google.js';
 import { normalizeBody } from '../gmail/normalize.js';
+import { extractUnsubscribeMetadata, parseMailto } from '../gmail/unsubscribe.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
 import crypto from 'node:crypto';
@@ -166,6 +167,7 @@ type SecretaryThread = {
   receivedAt: string;
   convo: string;
   participants: string[];
+  unsubscribe: any;
   actionFlow: ActionFlow | null;
   timeline: TimelineMessage[];
 };
@@ -338,6 +340,7 @@ router.post('/secretary/auto-summarize', async (req: Request, res: Response) => 
       headline: context.summary.headline,
       summary: context.summary.tldr,
       nextStep: context.summary.nextStep,
+      category: context.summary.category,
       participants: context.participants,
       transcript: context.transcript
     }, { forceFresh });
@@ -726,6 +729,80 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       }
     }
 
+    if (actionType === 'unsubscribe') {
+      const auth = getAuthedClient(sessionData);
+      const gmail = gmailClient(auth);
+      const metadata = await fetchUnsubscribeMetadata(gmail, context.summary.lastMsgId);
+      if (!metadata?.supported) {
+        return res.status(400).json({ error: 'Unsubscribe is not available for this email.' });
+      }
+
+      const executingFlow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'executing',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'executing',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+
+      try {
+        if (metadata.oneClick && metadata.unsubscribeUrl) {
+          await performOneClickUnsubscribe(metadata.unsubscribeUrl);
+        } else if (metadata.unsubscribeMailto) {
+          const mailto = parseMailto(metadata.unsubscribeMailto);
+          if (!mailto?.to) {
+            throw new Error('Unsubscribe address missing.');
+          }
+          await sendUnsubscribeEmail(gmail, mailto);
+        } else {
+          throw new Error('Unsubscribe option not supported.');
+        }
+        await gmail.users.threads.modify({
+          userId: 'me',
+          id: threadId,
+          requestBody: { removeLabelIds: ['INBOX'] }
+        });
+        await prisma.summary.deleteMany({ where: { userId: sessionData.user.id, threadId } });
+        await prisma.threadIndex.update({
+          where: { threadId_userId: { threadId, userId: sessionData.user.id } },
+          data: { inPrimaryInbox: false }
+        });
+        const completedFlow = await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'completed' }
+        });
+        await appendActionResult(
+          sessionData.user.id,
+          threadId,
+          '✅ Unsubscribe requested and archived. It can take a few days for emails to stop.'
+        );
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.json({ status: 'unsubscribed', flow: completedFlow, timeline });
+      } catch (err) {
+        if (handleMissingScopeError(err, sessionData, res)) return;
+        if (handleInsufficientScopeFromGaxios(err, sessionData, res)) return;
+        await prisma.actionFlow.update({
+          where: { id: executingFlow.id },
+          data: { state: 'failed' }
+        });
+        console.error('Failed to unsubscribe', err);
+        const message = err instanceof Error ? err.message : 'Unable to unsubscribe right now.';
+        await appendActionResult(sessionData.user.id, threadId, `Unsubscribe failed: ${message}`);
+        const timeline = await fetchTimeline(sessionData.user.id, threadId);
+        return res.status(500).json({ error: 'Unable to unsubscribe right now.', timeline });
+      }
+    }
+
     if (actionType === 'create_task') {
       const draftInput = normalizeDraftInput(req.body?.draft);
       const existingFlow = await prisma.actionFlow.findUnique({
@@ -1034,6 +1111,7 @@ async function buildThreadsPayload(_userId: string, items: ThreadListItem[]): Pr
     const summary = item.summary;
     const participants = parseParticipants(item.thread.participants);
     const emailTs = item.thread.lastMessageDate ? new Date(item.thread.lastMessageDate) : new Date();
+    const unsubscribe = (item.thread as ThreadIndex & { unsubscribe?: unknown }).unsubscribe ?? null;
 
     threads.push({
       threadId: item.thread.threadId,
@@ -1048,6 +1126,7 @@ async function buildThreadsPayload(_userId: string, items: ThreadListItem[]): Pr
       receivedAt: emailTs.toISOString(),
       convo: summary?.convoText || '',
       participants,
+      unsubscribe,
       actionFlow: null,
       timeline: []
     });
@@ -1227,7 +1306,7 @@ function parseParticipants(raw?: string | null): string[] {
 
 function normalizeActionTypeInput(raw: unknown): ActionType | null {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip' || value === 'reply') {
+  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip' || value === 'reply' || value === 'unsubscribe') {
     return value as ActionType;
   }
   return null;
@@ -1417,6 +1496,56 @@ function buildReplyMessage(input: {
   const body = normalizeReplyBody(input.body).replace(/\n/g, '\r\n');
   const raw = `${headers.join('\r\n')}\r\n\r\n${body}`;
   return encodeBase64Url(raw);
+}
+
+const UNSUBSCRIBE_METADATA_HEADERS = [
+  'List-Unsubscribe',
+  'List-Unsubscribe-Post',
+  'List-Id',
+  'Precedence'
+];
+
+async function fetchUnsubscribeMetadata(
+  gmail: ReturnType<typeof gmailClient>,
+  messageId: string
+) {
+  if (!messageId) return null;
+  const response = await gmail.users.messages.get({
+    userId: 'me',
+    id: messageId,
+    format: 'metadata',
+    metadataHeaders: UNSUBSCRIBE_METADATA_HEADERS
+  });
+  const headers = response.data.payload?.headers || [];
+  return extractUnsubscribeMetadata(headers);
+}
+
+async function performOneClickUnsubscribe(url: string) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'List-Unsubscribe=One-Click'
+  });
+  if (!resp.ok) {
+    throw new Error(`Unsubscribe request failed (${resp.status})`);
+  }
+}
+
+async function sendUnsubscribeEmail(
+  gmail: ReturnType<typeof gmailClient>,
+  mailto: { to: string; subject: string; body: string }
+) {
+  const subject = mailto.subject || 'Unsubscribe';
+  const body = mailto.body || 'Unsubscribe';
+  const raw = buildReplyMessage({
+    to: mailto.to,
+    subject,
+    body
+  });
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: { raw }
+  });
 }
 
 function encodeBase64Url(value: string) {

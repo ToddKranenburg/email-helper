@@ -2,6 +2,7 @@ import type { gmail_v1 } from 'googleapis';
 import type { OAuth2Client } from 'google-auth-library';
 import { gmailClient } from './client.js';
 import { normalizeBody } from './normalize.js';
+import { extractUnsubscribeMetadata } from './unsubscribe.js';
 import { prisma } from '../store/db.js';
 import type { Summary, ThreadIndex } from '@prisma/client';
 import { summarize } from '../llm/summarize.js';
@@ -96,6 +97,7 @@ export async function ensureThreadSummary(
   const unreadCount = recent.filter(msg => msg.labelIds?.includes('UNREAD')).length;
   const labelIds = latest.labelIds || [];
   const inPrimaryInbox = labelIds.includes('INBOX') && labelIds.includes('CATEGORY_PRIMARY') && !labelIds.includes('CHAT');
+  const unsubscribe = extractUnsubscribeMetadata(latestHeaders);
 
   const convoText = recent
     .map(msg => normalizeBody(msg.payload))
@@ -119,7 +121,8 @@ export async function ensureThreadSummary(
         snippet: full.data.snippet ?? undefined,
         gmailLabelIds: labelIds,
         inPrimaryInbox,
-        contentVersion: buildContentVersion(lastMessageDate, latest.id)
+        contentVersion: buildContentVersion(lastMessageDate, latest.id),
+        unsubscribe: unsubscribe ?? undefined
       }
     });
   }
@@ -161,6 +164,7 @@ export async function ensureThreadSummary(
       headline: (s as any).headline || '',
       summary: s.tldr,
       nextStep: s.next_step,
+      category: s.category,
       participants,
       transcript: convoText
     });
@@ -188,7 +192,8 @@ export async function ensureThreadSummary(
       lastMessageDate,
       unreadCount,
       gmailLabelIds: labelIds,
-      contentVersion: buildContentVersion(lastMessageDate, latest.id)
+      contentVersion: buildContentVersion(lastMessageDate, latest.id),
+      unsubscribe: unsubscribe ?? undefined
     }
   }).catch(() => null);
 

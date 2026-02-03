@@ -814,6 +814,13 @@
       gap: 8px;
       justify-content: center;
     }
+    .triage-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+      box-shadow: none;
+      transform: none;
+      filter: grayscale(0.2);
+    }
     .action-icon {
       font-size: 16px;
       line-height: 1;
@@ -832,6 +839,11 @@
       background: #eef2ff;
       color: #27336a;
       border: 1px solid #d7ddff;
+    }
+    .triage-btn.unsubscribe {
+      background: #fff1f3;
+      color: #7a1a1a;
+      border: 1px solid #f5c5cb;
     }
     .triage-btn.task {
       background: #ecfbf6;

@@ -58,6 +58,7 @@ model ThreadIndex {
   priorityReason  String?
   suggestedActionType String?
   extracted       Json?
+  unsubscribe     Json?
   lastScoredAt    DateTime?
   scoreVersion    String   @default("priority-v1")
   contentVersion  String?

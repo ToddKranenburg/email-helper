@@ -102,6 +102,7 @@
     reviewBtn: document.getElementById('action-review'),
     replyBtn: document.getElementById('action-reply'),
     archiveBtn: document.getElementById('action-archive'),
+    unsubscribeBtn: document.getElementById('action-unsubscribe'),
     taskBtn: document.getElementById('action-task'),
     skipBtn: document.getElementById('action-skip'),
     taskPanel: document.getElementById('task-panel'),
@@ -288,6 +289,9 @@
     }
     if (refs.archiveBtn) {
       refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
+    }
+    if (refs.unsubscribeBtn) {
+      refs.unsubscribeBtn.addEventListener('click', () => unsubscribeCurrent('button'));
     }
     if (refs.taskBtn) {
       refs.taskBtn.addEventListener('click', () => {
@@ -494,6 +498,13 @@
         openReplyPanelFromPrompt(question);
         return;
       }
+      if (intent === 'unsubscribe') {
+        stopAssistantTyping(state.activeId);
+        toggleComposer(Boolean(state.activeId));
+        if (submitBtn) submitBtn.disabled = false;
+        await executeActionForThread(state.activeId, 'unsubscribe');
+        return;
+      }
       if (intent === 'create_task') {
         stopAssistantTyping(state.activeId);
         toggleComposer(Boolean(state.activeId));
@@ -632,6 +643,9 @@
       if (actionType === 'archive') {
         await waitForAssistantSettled(threadId);
         removeCurrentFromQueue();
+      } else if (actionType === 'unsubscribe') {
+        await waitForAssistantSettled(threadId);
+        removeCurrentFromQueue();
       } else if (actionType === 'skip') {
         await waitForAssistantSettled(threadId);
         skipCurrent('action');
@@ -649,6 +663,9 @@
         renderChat(state.activeId);
       }
     } catch (err) {
+      if (actionType === 'unsubscribe') {
+        enqueueAssistantMessage(threadId, pickUnsubscribeUnavailableMessage());
+      }
       setChatError(err instanceof Error ? err.message : 'Unable to process that action.');
     }
   }
@@ -1968,6 +1985,7 @@
       receivedAt: typeof raw.receivedAt === 'string' ? raw.receivedAt : '',
       convo: typeof raw.convo === 'string' ? raw.convo : '',
       participants: Array.isArray(raw.participants) ? raw.participants.map(p => String(p || '').trim()).filter(Boolean) : [],
+      unsubscribe: normalizeUnsubscribe(raw.unsubscribe),
       actionFlow: normalizeActionFlow(raw.actionFlow),
       timeline: Array.isArray(raw.timeline) ? raw.timeline.map(normalizeTimelineMessage).filter(Boolean) : []
     };
@@ -1998,10 +2016,20 @@
   function normalizeActionFlow(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const allowedStates = new Set(['suggested', 'draft_ready', 'editing', 'executing', 'completed', 'failed']);
-    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip', 'external_action', 'reply']);
+    const allowedTypes = new Set(['archive', 'create_task', 'more_info', 'skip', 'external_action', 'reply', 'unsubscribe']);
     const actionType = typeof raw.actionType === 'string' && allowedTypes.has(raw.actionType) ? raw.actionType : '';
     const state = typeof raw.state === 'string' && allowedStates.has(raw.state) ? raw.state : 'suggested';
     return actionType ? { ...raw, actionType, state } : null;
+  }
+
+  function normalizeUnsubscribe(raw) {
+    if (!raw || typeof raw !== 'object') {
+      return { supported: false, oneClick: false, bulk: false };
+    }
+    const supported = Boolean(raw.supported);
+    const oneClick = Boolean(raw.oneClick);
+    const bulk = Boolean(raw.bulk);
+    return { supported, oneClick, bulk };
   }
 
   function normalizeTimelineMessage(raw) {
@@ -2025,13 +2053,13 @@
 
   function normalizeSuggestedAction(value) {
     const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'reply') return val;
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'reply' || val === 'unsubscribe') return val;
     return '';
   }
 
   function normalizeActionType(value) {
     const val = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'external_action' || val === 'reply') {
+    if (val === 'archive' || val === 'more_info' || val === 'create_task' || val === 'skip' || val === 'external_action' || val === 'reply' || val === 'unsubscribe') {
       return val;
     }
     return '';
@@ -2041,6 +2069,9 @@
     const next = normalizeSuggestedAction(actionFromNextStep(thread?.nextStep));
     if (next) return next;
     const summary = `${thread?.summary || thread?.headline || thread?.subject || ''}`.toLowerCase();
+    if (thread?.unsubscribe?.supported && (thread?.category || '').toLowerCase().startsWith('marketing')) {
+      return 'unsubscribe';
+    }
     if (summary.includes('reply') || summary.includes('respond')) {
       return 'reply';
     }
@@ -2087,6 +2118,7 @@
     if (actionType === 'more_info') return 'Tell me more';
     if (actionType === 'reply') return 'Reply';
     if (actionType === 'skip') return 'Skip';
+    if (actionType === 'unsubscribe') return 'Unsubscribe';
     return 'Do it';
   }
 
@@ -2094,6 +2126,7 @@
     const text = typeof nextStep === 'string' ? nextStep.toLowerCase() : '';
     if (!text) return '';
     if (text.includes('archive')) return 'archive';
+    if (text.includes('unsubscribe') || text.includes('opt out')) return 'unsubscribe';
     if (text.includes('reply') || text.includes('respond')) return 'reply';
     if (text.includes('remind') || text.includes('task') || text.includes('follow up') || text.includes('follow-up')) {
       return 'create_task';
@@ -2343,7 +2376,10 @@
         </div>`;
       }
       const agenticType = normalizeSuggestedAction(actionType) || '';
-      const disabled = actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip';
+      const thread = state.lookup.get(entry.threadId);
+      const canUnsubscribe = Boolean(thread?.unsubscribe?.supported);
+      const disabled = (actionFlow && actionFlow.state === 'completed' && actionFlow.actionType === 'skip')
+        || (agenticType === 'unsubscribe' && !canUnsubscribe);
       const label = suggestedActionLabel(agenticType);
       return `<div class="chat-message assistant">
         <div class="assistant-avatar" aria-hidden="true">S</div>
@@ -2457,10 +2493,13 @@
   function toggleComposer(enabled, options = {}) {
     const preserveTaskPanel = Boolean(options.preserveTaskPanel);
     const preserveReplyPanel = Boolean(options.preserveReplyPanel);
+    const activeThread = state.activeId ? state.lookup.get(state.activeId) : null;
+    const canUnsubscribe = Boolean(activeThread?.unsubscribe?.supported);
     refs.chatInput.disabled = !enabled || !state.activeId;
     if (refs.reviewBtn) refs.reviewBtn.disabled = !enabled || !state.activeId;
     if (refs.replyBtn) refs.replyBtn.disabled = !enabled || !state.activeId;
     if (refs.archiveBtn) refs.archiveBtn.disabled = !enabled || !state.activeId;
+    if (refs.unsubscribeBtn) refs.unsubscribeBtn.disabled = !enabled || !state.activeId || !canUnsubscribe;
     if (refs.taskBtn) refs.taskBtn.disabled = !enabled || !state.activeId;
     if (refs.skipBtn) refs.skipBtn.disabled = !enabled || !state.activeId;
     if (!enabled) {
@@ -2723,6 +2762,25 @@
     }
   }
 
+  async function unsubscribeCurrent(source) {
+    if (!state.activeId || !refs.unsubscribeBtn) return;
+    const threadId = state.activeId;
+    const thread = state.lookup.get(threadId);
+    if (!thread?.unsubscribe?.supported) {
+      enqueueAssistantMessage(threadId, pickUnsubscribeUnavailableMessage());
+      return;
+    }
+    const restoreBtn = withButtonBusy(refs.unsubscribeBtn, 'Unsubscribing…');
+    toggleComposer(false);
+    setChatError('');
+    try {
+      await executeActionForThread(threadId, 'unsubscribe');
+    } finally {
+      restoreBtn();
+      toggleComposer(Boolean(state.activeId));
+    }
+  }
+
   function removeCurrentFromQueue() {
     if (!state.activeId || !state.needs.length) return;
     const threadId = state.activeId;
@@ -2969,6 +3027,11 @@
         await executeActionForThread(state.activeId, 'skip');
         return true;
       }
+      if (action === 'unsubscribe') {
+        clearPendingSuggestedAction(state.activeId);
+        await executeActionForThread(state.activeId, 'unsubscribe');
+        return true;
+      }
       if (action === 'create_task') {
         clearPendingSuggestedAction(state.activeId);
         handleCreateTaskIntent();
@@ -2991,6 +3054,11 @@
     if (intent === 'archive') {
       clearPendingSuggestedAction(state.activeId);
       await executeActionForThread(state.activeId, 'archive');
+      return true;
+    }
+    if (intent === 'unsubscribe') {
+      clearPendingSuggestedAction(state.activeId);
+      await executeActionForThread(state.activeId, 'unsubscribe');
       return true;
     }
     if (intent === 'skip') {
@@ -3062,6 +3130,12 @@
       openReplyPanelFromPrompt(userText);
       return;
     }
+    if (intent === 'unsubscribe') {
+      clearPendingCreate();
+      closeTaskPanel(true);
+      await executeActionForThread(state.activeId, 'unsubscribe');
+      return;
+    }
 
     enqueueAssistantMessage(state.activeId, 'Please confirm: create the task as shown? (yes/no)');
   }
@@ -3100,6 +3174,15 @@
     if (!normalized) return false;
     const negative = ['no', 'n', 'nah', 'nope', 'not now', 'cancel', 'stop', 'hold on', 'wait', 'don’t', "don't", 'do not', 'no thanks', 'no thank you'];
     return negative.some(word => normalized === word || normalized.startsWith(`${word},`) || normalized.startsWith(`${word} `));
+  }
+
+  function pickUnsubscribeUnavailableMessage() {
+    const options = [
+      'Looks like Gmail does not offer an unsubscribe option for this sender.',
+      'I can’t unsubscribe from this one—Gmail didn’t provide a supported unsubscribe link.',
+      'No easy unsubscribe is available for this email. Want me to archive it instead?'
+    ];
+    return options[Math.floor(Math.random() * options.length)];
   }
 
   function promptArchiveAfterTask(result, options = {}) {
@@ -3200,6 +3283,21 @@
     if (!cleaned) return '';
     const archivePhrases = ['archive', 'archive this', 'archive it', 'archive email', 'archive message', 'archive thread'];
     if (archivePhrases.includes(cleaned)) return 'archive';
+    const unsubscribePhrases = [
+      'unsubscribe',
+      'unsubscribe me',
+      'unsubscribe from this',
+      'unsubscribe from this email',
+      'opt out',
+      'opt me out',
+      'remove me',
+      'remove me from this list',
+      'stop these emails',
+      'stop sending these',
+      'stop sending me these',
+      'stop emails like this'
+    ];
+    if (unsubscribePhrases.includes(cleaned)) return 'unsubscribe';
     const skipPhrases = ['skip', 'skip it', 'skip this', 'skip this one', 'skip this email', 'skip this thread'];
     if (skipPhrases.includes(cleaned)) return 'skip';
     const replyPhrases = [
@@ -3250,7 +3348,9 @@
     ];
     if (taskPhrases.includes(cleaned) || cleaned.includes('reminder')) return 'create_task';
     const intent = await evaluateIntent(text);
-    return intent === 'archive' || intent === 'skip' || intent === 'create_task' || intent === 'reply' ? intent : '';
+    return intent === 'archive' || intent === 'skip' || intent === 'create_task' || intent === 'reply' || intent === 'unsubscribe'
+      ? intent
+      : '';
   }
 
   async function evaluateIntent(rawText) {

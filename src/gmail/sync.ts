@@ -3,6 +3,7 @@ import { GaxiosError } from 'gaxios';
 import type { gmail_v1 } from 'googleapis';
 import type { OAuth2Client } from 'google-auth-library';
 import { gmailClient, INBOX_QUERY } from './client.js';
+import { extractUnsubscribeMetadata, type UnsubscribeMetadata } from './unsubscribe.js';
 import { prisma } from '../store/db.js';
 import { enqueuePrioritization } from '../prioritization/queue.js';
 
@@ -11,7 +12,17 @@ const INITIAL_SYNC_MAX_THREADS = Number(process.env.INITIAL_SYNC_MAX_THREADS ?? 
 const METADATA_CONCURRENCY = Number(process.env.SYNC_METADATA_CONCURRENCY ?? 6);
 const HISTORY_PAGE_LIMIT = Number(process.env.SYNC_HISTORY_PAGE_LIMIT ?? 500);
 
-const METADATA_HEADERS = ['Subject', 'From', 'To', 'Cc', 'Date'];
+const METADATA_HEADERS = [
+  'Subject',
+  'From',
+  'To',
+  'Cc',
+  'Date',
+  'List-Unsubscribe',
+  'List-Unsubscribe-Post',
+  'List-Id',
+  'Precedence'
+];
 
 export type SyncOutcome = {
   mode: 'initial' | 'history';
@@ -36,6 +47,7 @@ type ThreadMetadata = {
   inPrimaryInbox: boolean;
   lastGmailHistoryIdSeen: string | null;
   contentVersion: string | null;
+  unsubscribe: UnsubscribeMetadata | null;
 };
 
 function buildInitialQuery() {
@@ -105,6 +117,7 @@ function extractThreadMetadata(thread: gmail_v1.Schema$Thread): ThreadMetadata |
   const inPrimaryInbox = labelIds.includes('INBOX') && labelIds.includes('CATEGORY_PRIMARY') && !labelIds.includes('CHAT');
   const snippet = thread.snippet ?? null;
   const contentVersion = buildContentVersion(lastMessageDate, lastMessageId);
+  const unsubscribe = extractUnsubscribeMetadata(headers);
 
   return {
     threadId: thread.id,
@@ -119,7 +132,8 @@ function extractThreadMetadata(thread: gmail_v1.Schema$Thread): ThreadMetadata |
     gmailLabelIds: labelIds,
     inPrimaryInbox,
     lastGmailHistoryIdSeen: thread.historyId ?? null,
-    contentVersion
+    contentVersion,
+    unsubscribe
   };
 }
 
@@ -145,7 +159,8 @@ async function upsertThreadIndex(userId: string, metadata: ThreadMetadata) {
       snippet: metadata.snippet,
       gmailLabelIds: metadata.gmailLabelIds,
       lastGmailHistoryIdSeen: metadata.lastGmailHistoryIdSeen,
-      contentVersion: metadata.contentVersion
+      contentVersion: metadata.contentVersion,
+      unsubscribe: metadata.unsubscribe ?? undefined
     },
     create: {
       threadId: metadata.threadId,
@@ -161,7 +176,8 @@ async function upsertThreadIndex(userId: string, metadata: ThreadMetadata) {
       snippet: metadata.snippet,
       gmailLabelIds: metadata.gmailLabelIds,
       lastGmailHistoryIdSeen: metadata.lastGmailHistoryIdSeen,
-      contentVersion: metadata.contentVersion
+      contentVersion: metadata.contentVersion,
+      unsubscribe: metadata.unsubscribe ?? undefined
     }
   });
 }

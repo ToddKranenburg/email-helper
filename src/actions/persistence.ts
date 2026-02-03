@@ -2,7 +2,7 @@ import { Prisma, type ActionFlow, type TranscriptMessage } from '@prisma/client'
 import { prisma } from '../store/db.js';
 import { AutoSummaryResult, generateAutoSummary, generateTaskDraft, TaskDraft } from '../llm/autoActions.js';
 
-export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action' | 'reply';
+export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action' | 'reply' | 'unsubscribe';
 export type ActionState = 'suggested' | 'draft_ready' | 'editing' | 'executing' | 'completed' | 'failed';
 export type TranscriptType =
   | 'must_know'
@@ -38,6 +38,7 @@ export type AutoSummaryContext = {
   headline: string;
   summary: string;
   nextStep: string;
+  category?: string;
   participants: string[];
   transcript: string;
 };
@@ -105,15 +106,29 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
     transcript: ctx.transcript
   });
 
-  const actionType: ActionType = generated.suggestedAction?.actionType || 'skip';
-  const externalAction = generated.suggestedAction?.externalAction || null;
-  const prompt = generated.suggestedAction?.userFacingPrompt
+  let actionType: ActionType = generated.suggestedAction?.actionType || 'skip';
+  let externalAction = generated.suggestedAction?.externalAction || null;
+  let prompt = generated.suggestedAction?.userFacingPrompt
     || (actionType === 'external_action'
       ? 'This needs your attention outside the app. Here are the key links.'
       : actionType === 'reply'
         ? 'Draft a reply to the sender?'
-        : 'Skip for now and move to the next email?');
+        : actionType === 'unsubscribe'
+          ? 'Unsubscribe from this sender to stop these promos?'
+          : 'Skip for now and move to the next email?');
   const mustKnow = generated.mustKnow || ctx.summary || ctx.headline || ctx.subject || 'New email.';
+
+  const threadIndex = await prisma.threadIndex.findUnique({
+    where: { threadId_userId: { threadId: ctx.threadId, userId: ctx.userId } }
+  }).catch(() => null);
+  const unsubscribe = (threadIndex as { unsubscribe?: { supported?: boolean; bulk?: boolean } } | null | undefined)?.unsubscribe;
+  const isPromo = typeof ctx.category === 'string' && ctx.category.toLowerCase().startsWith('marketing');
+  const shouldSuggestUnsubscribe = Boolean(isPromo && unsubscribe?.supported && unsubscribe?.bulk);
+  if (shouldSuggestUnsubscribe) {
+    actionType = 'unsubscribe';
+    externalAction = null;
+    prompt = 'Unsubscribe from this sender to stop these promos?';
+  }
 
   const result = await prisma.$transaction(async tx => {
     await tx.transcriptMessage.deleteMany({ where: { userId: ctx.userId, threadId: ctx.threadId } });
