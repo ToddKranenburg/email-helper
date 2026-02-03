@@ -114,7 +114,18 @@ function extractThreadMetadata(thread: gmail_v1.Schema$Thread): ThreadMetadata |
   const participants = collectParticipants(sorted);
   const unreadCount = sorted.filter(msg => msg.labelIds?.includes('UNREAD')).length;
   const labelIds = latest.labelIds || [];
-  const inPrimaryInbox = labelIds.includes('INBOX') && labelIds.includes('CATEGORY_PRIMARY') && !labelIds.includes('CHAT');
+  const categoryLabels = labelIds.filter(label => label.startsWith('CATEGORY_'));
+  const isPrimaryCategory = categoryLabels.includes('CATEGORY_PRIMARY') || categoryLabels.includes('CATEGORY_PERSONAL');
+  const isNonPrimaryCategory = categoryLabels.some(label => (
+    label === 'CATEGORY_PROMOTIONS'
+    || label === 'CATEGORY_SOCIAL'
+    || label === 'CATEGORY_FORUMS'
+    || label === 'CATEGORY_UPDATES'
+  ));
+  let inPrimaryInbox = labelIds.includes('INBOX') && !labelIds.includes('CHAT') && !labelIds.includes('SPAM') && !labelIds.includes('TRASH');
+  if (categoryLabels.length) {
+    inPrimaryInbox = inPrimaryInbox && (isPrimaryCategory || !isNonPrimaryCategory);
+  }
   const snippet = thread.snippet ?? null;
   const contentVersion = buildContentVersion(lastMessageDate, lastMessageId);
   const unsubscribe = extractUnsubscribeMetadata(headers);
@@ -219,7 +230,11 @@ export async function reconcilePrimaryInboxSet(userId: string, fetchedThreadIds:
   return result.count;
 }
 
-export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: string): Promise<SyncOutcome> {
+export async function initialIndexBuildPrimaryInbox(
+  auth: OAuth2Client,
+  userId: string,
+  opts: { skipPriorityEnqueue?: boolean } = {}
+): Promise<SyncOutcome> {
   const gmail: gmail_v1.Gmail = gmailClient(auth);
   const query = buildInitialQuery();
   const limit = pLimit(METADATA_CONCURRENCY);
@@ -245,19 +260,27 @@ export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: 
       threads.map((thread: gmail_v1.Schema$Thread) => limit(async () => {
         if (!thread.id) return;
         fetchedThreadIds.add(thread.id);
-        const full = await gmail.users.threads.get({
-          userId: 'me',
-          id: thread.id,
-          format: 'metadata',
-          metadataHeaders: METADATA_HEADERS
-        });
-        const meta = extractThreadMetadata(full.data);
-        if (!meta) return;
-        meta.inPrimaryInbox = true;
-        await upsertThreadIndex(userId, meta);
-        updated += 1;
-        if (meta.inPrimaryInbox) {
-          affectedThreadIds.add(meta.threadId);
+        try {
+          const full = await gmail.users.threads.get({
+            userId: 'me',
+            id: thread.id,
+            format: 'metadata',
+            metadataHeaders: METADATA_HEADERS
+          });
+          const meta = extractThreadMetadata(full.data);
+          if (!meta) return;
+          meta.inPrimaryInbox = true;
+          await upsertThreadIndex(userId, meta);
+          updated += 1;
+          if (meta.inPrimaryInbox) {
+            affectedThreadIds.add(meta.threadId);
+          }
+        } catch (err) {
+          if (isNotFound(err)) {
+            console.warn('[sync] thread not found during initial sync', { userId, threadId: thread.id });
+            return;
+          }
+          throw err;
         }
       }))
     );
@@ -284,7 +307,9 @@ export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: 
     historyCursor
   });
 
-  enqueuePrioritization(userId, Array.from(affectedThreadIds), 'initial_sync');
+  if (!opts.skipPriorityEnqueue) {
+    enqueuePrioritization(userId, Array.from(affectedThreadIds), 'initial_sync');
+  }
 
   return {
     mode: 'initial',
@@ -297,6 +322,11 @@ export async function initialIndexBuildPrimaryInbox(auth: OAuth2Client, userId: 
 }
 
 function isHistoryTooOld(err: unknown) {
+  const gaxios = err instanceof GaxiosError ? err : null;
+  return gaxios?.response?.status === 404;
+}
+
+function isNotFound(err: unknown) {
   const gaxios = err instanceof GaxiosError ? err : null;
   return gaxios?.response?.status === 404;
 }
@@ -320,7 +350,11 @@ export function extractHistoryThreadIds(history: gmail_v1.Schema$History[]): Set
   return ids;
 }
 
-export async function incrementalSyncFromHistoryCursor(auth: OAuth2Client, userId: string): Promise<SyncOutcome> {
+export async function incrementalSyncFromHistoryCursor(
+  auth: OAuth2Client,
+  userId: string,
+  opts: { skipPriorityEnqueue?: boolean } = {}
+): Promise<SyncOutcome> {
   const gmail: gmail_v1.Gmail = gmailClient(auth);
   const account = await prisma.gmailAccount.findUnique({ where: { userId } });
   if (!account?.historyCursor) {
@@ -365,18 +399,26 @@ export async function incrementalSyncFromHistoryCursor(auth: OAuth2Client, userI
   if (affectedThreadIds.size) {
     await Promise.all(
       Array.from(affectedThreadIds).map(threadId => limit(async () => {
-        const full = await gmail.users.threads.get({
-          userId: 'me',
-          id: threadId,
-          format: 'metadata',
-          metadataHeaders: METADATA_HEADERS
-        });
-        const meta = extractThreadMetadata(full.data);
-        if (!meta) return;
-        await upsertThreadIndex(userId, meta);
-        updated += 1;
-        if (!meta.inPrimaryInbox) {
-          removed += 1;
+        try {
+          const full = await gmail.users.threads.get({
+            userId: 'me',
+            id: threadId,
+            format: 'metadata',
+            metadataHeaders: METADATA_HEADERS
+          });
+          const meta = extractThreadMetadata(full.data);
+          if (!meta) return;
+          await upsertThreadIndex(userId, meta);
+          updated += 1;
+          if (!meta.inPrimaryInbox) {
+            removed += 1;
+          }
+        } catch (err) {
+          if (isNotFound(err)) {
+            console.warn('[sync] thread not found during history sync', { userId, threadId });
+            return;
+          }
+          throw err;
         }
       }))
     );
@@ -396,7 +438,9 @@ export async function incrementalSyncFromHistoryCursor(auth: OAuth2Client, userI
   });
 
   const primaryIds = Array.from(affectedThreadIds);
-  enqueuePrioritization(userId, primaryIds, 'history_delta');
+  if (!opts.skipPriorityEnqueue) {
+    enqueuePrioritization(userId, primaryIds, 'history_delta');
+  }
 
   return {
     mode: 'history',
@@ -408,14 +452,18 @@ export async function incrementalSyncFromHistoryCursor(auth: OAuth2Client, userI
   };
 }
 
-export async function syncPrimaryInbox(auth: OAuth2Client, userId: string) {
+export async function syncPrimaryInbox(
+  auth: OAuth2Client,
+  userId: string,
+  opts: { skipPriorityEnqueue?: boolean } = {}
+) {
   const account = await prisma.gmailAccount.findUnique({ where: { userId } });
   if (!account?.historyCursor) {
-    return initialIndexBuildPrimaryInbox(auth, userId);
+    return initialIndexBuildPrimaryInbox(auth, userId, opts);
   }
   const existingCount = await prisma.threadIndex.count({ where: { userId } });
   if (existingCount === 0) {
-    return initialIndexBuildPrimaryInbox(auth, userId);
+    return initialIndexBuildPrimaryInbox(auth, userId, opts);
   }
-  return incrementalSyncFromHistoryCursor(auth, userId);
+  return incrementalSyncFromHistoryCursor(auth, userId, opts);
 }

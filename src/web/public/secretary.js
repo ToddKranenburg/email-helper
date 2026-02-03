@@ -1723,6 +1723,7 @@
 
   function getThreadListIds(variant) {
     if (variant === 'priority') return state.priority;
+    if (variant === 'queue') return sortThreadIdsByReceivedAt(state.needs);
     return state.needs;
   }
 
@@ -2906,16 +2907,17 @@
 
   function getReviewOrder() {
     if (!state.needs.length) return [];
-    const needsSet = new Set(state.needs);
-    const prioritySet = new Set(state.priority);
-    const ordered = [];
-    state.priority.forEach(id => {
-      if (needsSet.has(id)) ordered.push(id);
+    return sortThreadIdsByReceivedAt(state.needs);
+  }
+
+  function sortThreadIdsByReceivedAt(ids) {
+    return ids.slice().sort((a, b) => {
+      const aThread = state.lookup.get(a);
+      const bThread = state.lookup.get(b);
+      const aTime = aThread?.receivedAt ? new Date(aThread.receivedAt).getTime() : 0;
+      const bTime = bThread?.receivedAt ? new Date(bThread.receivedAt).getTime() : 0;
+      return bTime - aTime;
     });
-    state.needs.forEach(id => {
-      if (!prioritySet.has(id)) ordered.push(id);
-    });
-    return ordered;
   }
 
   function getNextReviewCandidate() {

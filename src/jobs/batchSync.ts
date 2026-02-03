@@ -3,6 +3,7 @@ import pLimit from 'p-limit';
 import { prisma } from '../store/db.js';
 import { getAuthedClientFromStoredToken, getMissingGmailScopes } from '../auth/google.js';
 import { ingestInboxWithClient } from '../gmail/fetch.js';
+import { runPrioritizationBatch } from '../prioritization/worker.js';
 
 const ACTIVE_WINDOW_DAYS = Number(process.env.BATCH_SYNC_ACTIVE_DAYS ?? 30);
 const MIN_INTERVAL_MINUTES = Number(process.env.BATCH_SYNC_MIN_INTERVAL_MINUTES ?? 30);
@@ -96,7 +97,15 @@ async function syncUser(user: SyncUser): Promise<'ok' | 'skipped' | 'error'> {
       tokenType: token.tokenType,
       expiryDate: token.expiryDate
     });
-    const result = await ingestInboxWithClient(auth, user.id);
+    const result = await ingestInboxWithClient(auth, user.id, { skipPriorityEnqueue: true });
+    if (result.affectedThreadIds.length) {
+      try {
+        await runPrioritizationBatch(user.id, result.affectedThreadIds, `batch_sync_${result.mode}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[batch-sync] prioritization failed', { userId: user.id, error: message });
+      }
+    }
     await markSyncResult(user.id, 'ok', null);
     console.log('[batch-sync] synced', {
       userId: user.id,
