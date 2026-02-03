@@ -8,6 +8,9 @@
   const priorityBatchFinishedAt = typeof bootstrap.priorityBatchFinishedAt === 'string'
     ? bootstrap.priorityBatchFinishedAt
     : null;
+  const priorityMeta = bootstrap.priorityMeta && typeof bootstrap.priorityMeta === 'object'
+    ? bootstrap.priorityMeta
+    : null;
   const priorityItems = normalizePriorityItems(priorityPayload);
   const hasServerPriority = Array.isArray(bootstrap.priority);
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
@@ -23,7 +26,9 @@
     'Picking this back up. Need a quick refresher?',
     'Returning to this thread. What’s the next move?'
   ];
-  const PRIORITY_LIMIT = 6;
+  const PRIORITY_PAGE_SIZE = typeof priorityMeta?.pageSize === 'number' && Number.isFinite(priorityMeta.pageSize)
+    ? priorityMeta.pageSize
+    : 10;
   const PRIORITY_MIN_SCORE = 4;
   const PRIORITY_POLL_INTERVAL_MS = 8000;
   const PRIORITY_LOADING_MIN_MS = 450;
@@ -58,6 +63,24 @@
     return {
       prioritizedCount: Math.max(0, prioritizedCount),
       totalCount: Math.max(0, totalCount)
+    };
+  }
+
+  function normalizePriorityMeta(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const totalCount = Number(raw.totalCount);
+    const pageSize = Number(raw.pageSize);
+    const offset = Number(raw.offset);
+    const nextOffset = Number(raw.nextOffset);
+    if (!Number.isFinite(totalCount) || !Number.isFinite(pageSize) || !Number.isFinite(offset) || !Number.isFinite(nextOffset)) {
+      return null;
+    }
+    return {
+      totalCount: Math.max(0, totalCount),
+      pageSize: Math.max(1, pageSize),
+      offset: Math.max(0, offset),
+      hasMore: Boolean(raw.hasMore),
+      nextOffset: Math.max(0, nextOffset)
     };
   }
 
@@ -141,6 +164,17 @@
 
   const DEFAULT_PLACEHOLDER = refs.chatInput?.placeholder || 'Type a message…';
   const SUGGESTED_PLACEHOLDER = 'Press Enter to accept • or type to respond…';
+  const initialPriorityTotal = typeof priorityMeta?.totalCount === 'number' && Number.isFinite(priorityMeta.totalCount)
+    ? Math.max(0, priorityMeta.totalCount)
+    : priorityItems.length;
+  const initialPriorityOffset = typeof priorityMeta?.offset === 'number' && Number.isFinite(priorityMeta.offset)
+    ? Math.max(0, priorityMeta.offset)
+    : 0;
+  const initialPriorityLoaded = initialPriorityOffset + priorityItems.length;
+  const initialPriorityNextOffset = typeof priorityMeta?.nextOffset === 'number' && Number.isFinite(priorityMeta.nextOffset)
+    ? Math.max(0, priorityMeta.nextOffset)
+    : initialPriorityLoaded;
+  const initialPriorityHasMore = Boolean(priorityMeta?.hasMore);
 
   const state = {
     lookup: new Map(),
@@ -150,6 +184,12 @@
     priorityMeta: new Map(),
     prioritySource: hasServerPriority ? 'server' : 'local',
     priorityLoading: false,
+    priorityLoadingMore: false,
+    priorityHasMore: initialPriorityHasMore,
+    priorityOffset: initialPriorityLoaded,
+    priorityNextOffset: initialPriorityNextOffset,
+    priorityTotal: initialPriorityTotal,
+    priorityPageSize: PRIORITY_PAGE_SIZE,
     prioritySyncStartAt: 0,
     priorityLastBatchAt: parseTimestamp(priorityBatchFinishedAt),
     priorityProgress: normalizePriorityProgress(priorityProgress),
@@ -236,6 +276,9 @@
         reasonWeight: item.reasonWeight
       });
     });
+    state.priorityOffset = state.priority.length;
+    state.priorityNextOffset = state.priority.length;
+    state.priorityHasMore = state.priority.length < state.priorityTotal;
   }
   state.totalLoaded = state.positions.size;
 
@@ -358,7 +401,12 @@
     if (!(targetEl instanceof Element)) return;
     const loadMoreBtn = targetEl.closest('.load-more');
     if (loadMoreBtn) {
-      fetchNextPage('button');
+      const loadVariant = loadMoreBtn.getAttribute('data-variant') || variant;
+      if (loadVariant === 'priority') {
+        void fetchNextPriorityPage('button');
+      } else {
+        fetchNextPage('button');
+      }
       return;
     }
     const selector = variant === 'drawer' ? '.drawer-thread' : '.queue-item';
@@ -747,6 +795,37 @@
       updateDrawerLists();
       updateLoadMoreButtons();
       nudgeComposer('Loaded more - type your next move here.', { focus: false });
+    }
+  }
+
+  async function fetchNextPriorityPage(reason) {
+    if (!state.priorityHasMore || state.priorityLoadingMore) return [];
+    state.priorityLoadingMore = true;
+    updatePriorityPill();
+    updateDrawerLists();
+    const targetOffset = state.priorityNextOffset || state.priorityOffset || 0;
+    try {
+      const resp = await fetch(`/api/priority?offset=${targetOffset}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !Array.isArray(data?.priority)) {
+        throw new Error(data?.error || 'Unable to load more priority emails.');
+      }
+      const before = state.priority.length;
+      applyPriorityPayload(data);
+      const added = state.priority.length - before;
+      updatePriorityPill();
+      updateDrawerLists();
+      return added;
+    } catch (err) {
+      console.error('Failed to load more priority threads', err);
+      return [];
+    } finally {
+      state.priorityLoadingMore = false;
+      updateDrawerLists();
     }
   }
 
@@ -1496,11 +1575,11 @@
   function updateHeaderCount() {
     if (!refs.count) return;
     const loaded = getLoadedCount();
-    let label = '0 emails under review';
+    let label = '0 emails in inbox';
     if (loaded > 0 && state.hasMore) {
-      label = `${loaded}+ emails under review`;
+      label = `${loaded}+ emails in inbox`;
     } else if (loaded > 0) {
-      label = `${loaded} email${loaded === 1 ? '' : 's'} under review`;
+      label = `${loaded} email${loaded === 1 ? '' : 's'} in inbox`;
     }
     refs.count.textContent = label;
     updateLoadMoreButtons();
@@ -1511,7 +1590,7 @@
     const remaining = state.needs.length;
     const suffix = state.hasMore ? '+' : '';
     if (remaining) {
-      refs.queuePill.textContent = `${remaining}${suffix} remaining`;
+      refs.queuePill.textContent = `${remaining}${suffix} total`;
       return;
     }
     refs.queuePill.textContent = state.hasMore ? 'Load more to continue' : 'All done';
@@ -1523,9 +1602,11 @@
       refs.priorityPill.textContent = 'Prioritizing…';
       return;
     }
-    const remaining = state.priority.length;
-    if (remaining) {
-      refs.priorityPill.textContent = `${remaining} urgent`;
+    const total = Number.isFinite(state.priorityTotal) && state.priorityTotal > 0
+      ? state.priorityTotal
+      : state.priority.length;
+    if (total) {
+      refs.priorityPill.textContent = `${total} urgent`;
       return;
     }
     refs.priorityPill.textContent = state.needs.length ? 'All clear' : 'No priority mail';
@@ -1550,7 +1631,11 @@
     }
     const needsSpinner = prioritized < progress.totalCount;
     const spinner = needsSpinner ? '<span class="priority-mini-spinner" aria-hidden="true"></span>' : '';
-    refs.priorityProgress.innerHTML = `${spinner}<span>Prioritized ${prioritized} of ${progress.totalCount}</span>`;
+    if (needsSpinner) {
+      refs.priorityProgress.innerHTML = `${spinner}<span>Reviewed ${prioritized} of ${progress.totalCount}</span>`;
+      return;
+    }
+    refs.priorityProgress.innerHTML = `<span>Finished reviewing</span>`;
   }
 
   function updateLoadMoreButtons() {
@@ -1598,7 +1683,7 @@
     if (refs.progressTrack) {
       refs.progressTrack.setAttribute('aria-valuenow', String(pct));
       const labelTotal = state.hasMore ? `${loaded}+` : `${loaded}`;
-      refs.progressTrack.setAttribute('aria-valuetext', `${done} reviewed out of ${labelTotal}`);
+      refs.progressTrack.setAttribute('aria-valuetext', `${done} checked out of ${labelTotal}`);
     }
   }
 
@@ -1688,17 +1773,43 @@
 
   function applyPriorityPayload(payload) {
     const priorityItems = normalizePriorityItems(Array.isArray(payload?.priority) ? payload.priority : null);
+    const meta = normalizePriorityMeta(payload?.meta);
+    const shouldAppend = Boolean(meta && meta.offset > 0);
     if (priorityItems) {
       state.prioritySource = 'server';
-      state.priority = priorityItems.map(item => item.threadId);
-      state.priorityMeta.clear();
-      priorityItems.forEach(item => {
-        state.priorityMeta.set(item.threadId, {
-          score: item.score,
-          reason: item.reason,
-          reasonWeight: item.reasonWeight
+      if (shouldAppend) {
+        const seen = new Set(state.priority);
+        priorityItems.forEach(item => {
+          if (!seen.has(item.threadId)) {
+            state.priority.push(item.threadId);
+            seen.add(item.threadId);
+          }
+          state.priorityMeta.set(item.threadId, {
+            score: item.score,
+            reason: item.reason,
+            reasonWeight: item.reasonWeight
+          });
         });
-      });
+      } else {
+        const previousMeta = new Map(state.priorityMeta);
+        const nextIds = priorityItems.map(item => item.threadId);
+        const nextSet = new Set(nextIds);
+        const preserved = state.priority.filter(id => !nextSet.has(id));
+        state.priority = nextIds.concat(preserved);
+        state.priorityMeta.clear();
+        priorityItems.forEach(item => {
+          state.priorityMeta.set(item.threadId, {
+            score: item.score,
+            reason: item.reason,
+            reasonWeight: item.reasonWeight
+          });
+        });
+        preserved.forEach(threadId => {
+          const previous = previousMeta.get(threadId);
+          if (previous) state.priorityMeta.set(threadId, previous);
+        });
+      }
+      state.priorityOffset = state.priority.length;
     }
 
     const incoming = Array.isArray(payload?.threads)
@@ -1711,6 +1822,16 @@
     const progress = normalizePriorityProgress(payload?.progress);
     if (progress) {
       state.priorityProgress = progress;
+    }
+    if (meta) {
+      state.priorityTotal = meta.totalCount;
+      state.priorityHasMore = state.priority.length < meta.totalCount;
+      state.priorityNextOffset = state.priority.length;
+      state.priorityPageSize = meta.pageSize;
+    } else if (priorityItems) {
+      state.priorityTotal = Math.max(state.priorityTotal || 0, state.priority.length);
+      state.priorityHasMore = state.priorityTotal > state.priority.length;
+      state.priorityNextOffset = state.priority.length;
     }
 
     updateHeaderCount();
@@ -1748,7 +1869,7 @@
         li.className = 'queue-empty priority-empty';
         li.textContent = 'No urgent emails right now.';
       } else {
-        li.textContent = 'Nothing queued up.';
+        li.textContent = 'Inbox is empty.';
       }
       listEl.appendChild(li);
     }
@@ -1758,8 +1879,21 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = buildThreadClass(variant, { loadMore: true });
+      btn.dataset.variant = 'queue';
       btn.textContent = state.loadingMore ? 'Loading…' : 'Load more';
       btn.disabled = state.loadingMore;
+      li.appendChild(btn);
+      listEl.appendChild(li);
+    }
+
+    if (variant === 'priority' && state.priorityHasMore) {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = buildThreadClass(variant, { loadMore: true });
+      btn.dataset.variant = 'priority';
+      btn.textContent = state.priorityLoadingMore ? 'Loading…' : 'Load more';
+      btn.disabled = state.priorityLoadingMore;
       li.appendChild(btn);
       listEl.appendChild(li);
     }
@@ -1827,7 +1961,11 @@
       const bTime = b.receivedAt ? new Date(b.receivedAt).getTime() : 0;
       return bTime - aTime;
     });
-    state.priority = scored.slice(0, PRIORITY_LIMIT).map(item => item.threadId);
+    state.priority = scored.map(item => item.threadId);
+    state.priorityTotal = state.priority.length;
+    state.priorityHasMore = false;
+    state.priorityOffset = state.priority.length;
+    state.priorityNextOffset = state.priority.length;
   }
 
   function scoreThreadPriority(thread) {
@@ -2805,7 +2943,7 @@
       if (state.hasMore) {
         autoLoadNextBatch();
       } else {
-        setEmptyState('All emails reviewed. Nice work.');
+        setEmptyState('Inbox zero. You’re caught up.');
         toggleComposer(false);
       }
       return;
@@ -2822,7 +2960,7 @@
     if (state.hasMore) {
       autoLoadNextBatch();
     } else {
-      setEmptyState('All emails reviewed. Nice work.');
+      setEmptyState('Inbox zero. You’re caught up.');
       toggleComposer(false);
     }
   }
@@ -2842,7 +2980,7 @@
     if (!added.length) {
       const message = state.hasMore
         ? 'Unable to load more emails. Tap Load more to retry.'
-        : 'All emails reviewed. Nice work.';
+        : 'Inbox zero. You’re caught up.';
       setEmptyState(message);
       toggleComposer(false);
     }
@@ -2894,7 +3032,7 @@
       return;
     }
     if (!hasRoomToAdvance) {
-      setEmptyState('All emails reviewed. Nice work.');
+      setEmptyState('Inbox zero. You’re caught up.');
       toggleComposer(false);
       return;
     }
@@ -2957,7 +3095,7 @@
       renderChat();
     }
 
-    const skipPromise = enqueueAssistantMessage(state.activeId, 'Skipping for now. It stays in Needs Review.');
+    const skipPromise = enqueueAssistantMessage(state.activeId, 'Skipping for now. It stays in Inbox.');
     updateHint(state.activeId);
 
     clearAutoAdvance();
@@ -3237,7 +3375,7 @@
 
     if (isNegativeResponse(normalized)) {
       clearPendingArchive();
-      enqueueAssistantMessage(state.activeId, 'Okay, leaving it in Needs Review. Ask to archive anytime.');
+      enqueueAssistantMessage(state.activeId, 'Okay, leaving it in Inbox. Ask to archive anytime.');
       return;
     }
 
@@ -3246,8 +3384,8 @@
 
   function setEmptyState(message) {
     const fallback = state.hasMore
-      ? 'You reviewed everything loaded. Tap Load more to keep going.'
-      : 'All emails reviewed. Nice work.';
+      ? 'You checked everything loaded. Tap Load more to keep going.'
+      : 'Inbox zero. You’re caught up.';
     const copy = message || fallback;
     closeTaskPanel(true);
     closeReplyPanel(true);

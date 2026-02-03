@@ -13,20 +13,29 @@ export type PriorityItem = {
   summary: Summary | null;
 };
 
-export async function loadPriorityQueue(userId: string, opts: { limit: number }) {
+export const ACTIONABLE_ACTION_TYPES = ['reply', 'task', 'schedule'] as const;
+
+export function priorityQueueWhere(userId: string) {
+  return {
+    userId,
+    inPrimaryInbox: true,
+    priorityScore: { not: null },
+    suggestedActionType: { in: ACTIONABLE_ACTION_TYPES }
+  };
+}
+
+export async function loadPriorityQueue(userId: string, opts: { limit: number; offset?: number }) {
   const limit = Math.max(opts.limit || 0, 0);
+  const offset = Math.max(opts.offset || 0, 0);
   if (!limit) {
     return { priority: [] as PriorityEntry[], items: [] as PriorityItem[] };
   }
 
   const threads = await prisma.threadIndex.findMany({
-    where: {
-      userId,
-      inPrimaryInbox: true,
-      priorityScore: { not: null }
-    },
+    where: priorityQueueWhere(userId),
     orderBy: [{ priorityScore: 'desc' }, { lastMessageDate: 'desc' }],
-    take: limit
+    take: limit,
+    skip: offset
   });
 
   if (!threads.length) {

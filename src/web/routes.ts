@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ingestInbox } from '../gmail/fetch.js';
 import { ensureThreadSummary } from '../gmail/summary.js';
-import { loadPriorityQueue, type PriorityEntry } from '../actions/priorityQueue.js';
+import { loadPriorityQueue, priorityQueueWhere, type PriorityEntry } from '../actions/priorityQueue.js';
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -31,7 +31,7 @@ import {
 
 export const router = Router();
 const PAGE_SIZE = 20;
-const PRIORITY_LIMIT = 6;
+const PRIORITY_PAGE_SIZE = 10;
 const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
@@ -201,10 +201,11 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/dashboard.html'), 'utf8');
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const threads = await buildThreadsPayload(userId, pageData.items);
-  const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
-  const [prioritizedCount, totalCount, latestCompletedBatch] = await Promise.all([
+  const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_PAGE_SIZE, offset: 0 });
+  const [prioritizedCount, totalCount, totalPriorityCount, latestCompletedBatch] = await Promise.all([
     prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true, priorityScore: { not: null } } }),
     prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } }),
+    prisma.threadIndex.count({ where: priorityQueueWhere(userId) }),
     prisma.prioritizationBatch.findFirst({
       where: { userId, status: 'completed', finishedAt: { not: null } },
       orderBy: { finishedAt: 'desc' }
@@ -224,12 +225,21 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     hasMore: pageData.hasMore,
     nextPage: pageData.nextPage
   };
+  const priorityHasMore = priorityQueue.items.length < totalPriorityCount;
+  const priorityMeta = {
+    totalCount: totalPriorityCount,
+    pageSize: PRIORITY_PAGE_SIZE,
+    offset: 0,
+    hasMore: priorityHasMore,
+    nextOffset: priorityHasMore ? priorityQueue.items.length : 0
+  };
   const withFlag = `${render(
     body,
     mergedThreads,
     pageMeta,
     priorityQueue.priority,
-    { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null }
+    { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null },
+    priorityMeta
   )}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
@@ -935,22 +945,33 @@ router.get('/api/priority', async (req: Request, res: Response) => {
   if (await ensureRefreshTokenForApi(sessionData, res)) return;
   const userId = sessionData.user.id;
   try {
-    const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_LIMIT });
+    const offsetParam = typeof req.query.offset === 'string' ? parseInt(req.query.offset, 10) : 0;
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0;
+    const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_PAGE_SIZE, offset });
     const priorityThreads = priorityQueue.items.length
       ? await buildThreadsPayload(userId, priorityQueue.items)
       : [];
-    const [prioritizedCount, totalCount, latestCompletedBatch] = await Promise.all([
+    const [prioritizedCount, totalCount, totalPriorityCount, latestCompletedBatch] = await Promise.all([
       prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true, priorityScore: { not: null } } }),
       prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } }),
+      prisma.threadIndex.count({ where: priorityQueueWhere(userId) }),
       prisma.prioritizationBatch.findFirst({
         where: { userId, status: 'completed', finishedAt: { not: null } },
         orderBy: { finishedAt: 'desc' }
       })
     ]);
+    const hasMore = offset + priorityQueue.items.length < totalPriorityCount;
     return res.json({
       priority: priorityQueue.priority,
       threads: priorityThreads,
       progress: { prioritizedCount, totalCount },
+      meta: {
+        offset,
+        pageSize: PRIORITY_PAGE_SIZE,
+        totalCount: totalPriorityCount,
+        hasMore,
+        nextOffset: hasMore ? offset + priorityQueue.items.length : 0
+      },
       batchFinishedAt: latestCompletedBatch?.finishedAt
         ? latestCompletedBatch.finishedAt.toISOString()
         : null
@@ -1166,9 +1187,10 @@ function render(
   items: SecretaryThread[],
   meta: PageMeta,
   priority: PriorityEntry[],
-  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null }
+  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null },
+  priorityMeta: { totalCount: number; pageSize: number; offset: number; hasMore: boolean; nextOffset: number }
 ) {
-  const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityProgress);
+  const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityProgress, priorityMeta);
   return `${tpl}\n${secretaryScript}`;
 }
 
@@ -1176,11 +1198,13 @@ function renderSecretaryAssistant(
   items: SecretaryThread[],
   meta: PageMeta,
   priority: PriorityEntry[],
-  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null }
+  priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null },
+  priorityMeta: { totalCount: number; pageSize: number; offset: number; hasMore: boolean; nextOffset: number }
 ) {
   const payload = safeJson({
     threads: items,
     priority,
+    priorityMeta,
     priorityProgress: {
       prioritizedCount: priorityProgress.prioritizedCount,
       totalCount: priorityProgress.totalCount
