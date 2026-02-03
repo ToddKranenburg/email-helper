@@ -16,7 +16,7 @@
         </div>
       </header>
       <p id="ingest-error" class="ingest-error hidden" role="alert"></p>
-      <aside class="priority-queue" id="priority-queue" aria-label="Priority Queue">
+      <aside class="priority-queue queue-collapsible" id="priority-queue" aria-label="Priority Queue">
         <div class="review-queue-head priority-queue-head">
           <div>
             <p class="review-label priority-label">Priority Queue</p>
@@ -24,21 +24,21 @@
             <p class="priority-progress" id="priority-progress"></p>
           </div>
           <div class="review-meta">
-            <p class="review-subtext priority-subtext">Urgent, high-impact threads first.</p>
+            <button class="queue-toggle" id="priority-toggle" type="button" aria-expanded="true" aria-controls="priority-list">Collapse</button>
           </div>
         </div>
         <ul id="priority-list" class="queue-list priority-list" aria-live="polite">
           <li class="queue-empty priority-empty">No urgent emails right now.</li>
         </ul>
       </aside>
-      <aside class="review-queue" id="review-queue" aria-label="Inbox">
+      <aside class="review-queue queue-collapsible is-collapsed" id="review-queue" aria-label="Inbox">
         <div class="review-queue-head">
           <div>
             <p class="review-label">Inbox</p>
             <p class="review-count" id="queue-pill-text">All done</p>
           </div>
           <div class="review-meta">
-            <p class="review-subtext">Tap to jump to any email.</p>
+            <button class="queue-toggle" id="queue-toggle" type="button" aria-expanded="false" aria-controls="review-list">Expand</button>
           </div>
         </div>
         <ul id="review-list" class="queue-list" aria-live="polite">

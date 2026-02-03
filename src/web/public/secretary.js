@@ -17,6 +17,9 @@
   const PAGE_SIZE = typeof bootstrap.pageSize === 'number' ? bootstrap.pageSize : 20;
   const HAS_MORE = Boolean(bootstrap.hasMore);
   const NEXT_PAGE = typeof bootstrap.nextPage === 'number' ? bootstrap.nextPage : (HAS_MORE ? 2 : 0);
+  const TOTAL_ITEMS = typeof bootstrap.totalItems === 'number' && Number.isFinite(bootstrap.totalItems)
+    ? Math.max(0, bootstrap.totalItems)
+    : 0;
   const DEFAULT_NUDGE = 'Type your next move here.';
   const REVIEW_PROMPT = 'Give me a more detailed but easy-to-digest summary of this email. Highlight the main points, asks, deadlines, and any decisions in quick bullets.';
   const REVISIT_PROMPTS = [
@@ -152,7 +155,11 @@
     replySubmit: document.getElementById('reply-submit'),
     replyClose: document.getElementById('reply-close'),
     reviewList: document.getElementById('review-list'),
-    syncForm: document.getElementById('ingest-form')
+    syncForm: document.getElementById('ingest-form'),
+    priorityQueue: document.getElementById('priority-queue'),
+    reviewQueue: document.getElementById('review-queue'),
+    priorityToggle: document.getElementById('priority-toggle'),
+    queueToggle: document.getElementById('queue-toggle')
   };
   const loadingOverlay = document.getElementById('loading');
   const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
@@ -200,9 +207,11 @@
     timelineMessageIds: new Set(),
     serverTimelines: new Map(),
     actionFlows: new Map(),
+    activeQueue: 'queue',
     activeId: '',
     typing: false,
     totalLoaded: threads.length,
+    inboxTotal: TOTAL_ITEMS,
     pageSize: PAGE_SIZE,
     hasMore: HAS_MORE,
     nextPage: NEXT_PAGE,
@@ -297,6 +306,7 @@
     updateQueuePill();
     updateDrawerLists();
     updateLoadMoreButtons();
+    syncQueueToggles();
     wireEvents();
     startPriorityPolling();
 
@@ -360,6 +370,12 @@
 
     if (refs.priorityList) refs.priorityList.addEventListener('click', (event) => handleThreadListClick(event, 'priority'));
     if (refs.reviewList) refs.reviewList.addEventListener('click', (event) => handleThreadListClick(event, 'queue'));
+    if (refs.priorityToggle) {
+      refs.priorityToggle.addEventListener('click', () => toggleQueueSection('priority'));
+    }
+    if (refs.queueToggle) {
+      refs.queueToggle.addEventListener('click', () => toggleQueueSection('review'));
+    }
 
     document.addEventListener('click', (event) => {
       const target = event.target;
@@ -415,7 +431,8 @@
     const threadId = target.dataset.threadId;
     if (!threadId || !state.lookup.has(threadId)) return;
     if (variant === 'drawer') toggleDrawer(false);
-    setActiveThread(threadId);
+    const source = variant === 'priority' ? 'priority' : 'queue';
+    setActiveThread(threadId, { source });
   }
 
   function handleTimelineClick(event) {
@@ -772,6 +789,9 @@
       state.nextPage = state.hasMore
         ? (typeof meta.nextPage === 'number' ? meta.nextPage : targetPage + 1)
         : 0;
+      if (typeof meta.totalItems === 'number' && Number.isFinite(meta.totalItems)) {
+        state.inboxTotal = Math.max(0, meta.totalItems);
+      }
       state.totalLoaded = state.positions.size;
       updateHeaderCount();
       updateProgress();
@@ -829,9 +849,17 @@
     }
   }
 
-  function setActiveThread(threadId) {
+  function setActiveThread(threadId, options = {}) {
     if (!threadId || !state.lookup.has(threadId)) return;
     if (state.activeId === threadId) return;
+    const source = options.source;
+    if (source === 'priority' || source === 'queue') {
+      state.activeQueue = source;
+    } else if (!state.activeQueue) {
+      state.activeQueue = state.priority.includes(threadId) ? 'priority' : 'queue';
+    } else if (state.activeQueue === 'priority' && !state.priority.includes(threadId)) {
+      state.activeQueue = 'queue';
+    }
     const wasSeen = state.seenThreads.has(threadId);
     clearAutoAdvance();
     state.activeId = threadId;
@@ -1574,12 +1602,10 @@
 
   function updateHeaderCount() {
     if (!refs.count) return;
-    const loaded = getLoadedCount();
+    const total = Number.isFinite(state.inboxTotal) ? state.inboxTotal : getLoadedCount();
     let label = '0 emails in inbox';
-    if (loaded > 0 && state.hasMore) {
-      label = `${loaded}+ emails in inbox`;
-    } else if (loaded > 0) {
-      label = `${loaded} email${loaded === 1 ? '' : 's'} in inbox`;
+    if (total > 0) {
+      label = `${total} email${total === 1 ? '' : 's'} in inbox`;
     }
     refs.count.textContent = label;
     updateLoadMoreButtons();
@@ -1587,10 +1613,9 @@
 
   function updateQueuePill() {
     if (!refs.queuePill) return;
-    const remaining = state.needs.length;
-    const suffix = state.hasMore ? '+' : '';
-    if (remaining) {
-      refs.queuePill.textContent = `${remaining}${suffix} total`;
+    const total = Number.isFinite(state.inboxTotal) ? state.inboxTotal : state.needs.length;
+    if (total) {
+      refs.queuePill.textContent = `${total} total`;
       return;
     }
     refs.queuePill.textContent = state.hasMore ? 'Load more to continue' : 'All done';
@@ -1606,7 +1631,7 @@
       ? state.priorityTotal
       : state.priority.length;
     if (total) {
-      refs.priorityPill.textContent = `${total} urgent`;
+      refs.priorityPill.textContent = `${total} emails to address`;
       return;
     }
     refs.priorityPill.textContent = state.needs.length ? 'All clear' : 'No priority mail';
@@ -2923,7 +2948,7 @@
   function removeCurrentFromQueue() {
     if (!state.activeId || !state.needs.length) return;
     const threadId = state.activeId;
-    const order = getReviewOrder();
+    const order = getReviewOrder({ queue: state.activeQueue });
     const orderIndex = order.indexOf(threadId);
     const index = state.needs.indexOf(threadId);
     if (index === -1) return;
@@ -2948,11 +2973,22 @@
       }
       return;
     }
-    const nextId = getNextUnreviewedAfter(threadId, {
+    const allowWrap = state.activeQueue === 'priority' ? !state.priorityHasMore : !state.hasMore;
+    let nextId = getNextUnreviewedAfter(threadId, {
       order,
       startIndex: orderIndex + 1,
-      allowWrap: !state.hasMore
+      allowWrap
     });
+    if (!nextId && state.activeQueue === 'priority') {
+      const fallbackOrder = getReviewOrder({ queue: 'queue' });
+      const fallbackIndex = fallbackOrder.indexOf(threadId);
+      nextId = getNextUnreviewedAfter(threadId, {
+        order: fallbackOrder,
+        startIndex: Math.max(0, fallbackIndex + 1),
+        allowWrap: !state.hasMore,
+        excludeId: threadId
+      });
+    }
     if (nextId) {
       setActiveThread(nextId);
       return;
@@ -2987,11 +3023,15 @@
   }
 
   function advanceToNextThread(threadId = state.activeId) {
-    const order = getReviewOrder();
+    const order = getReviewOrder({ queue: state.activeQueue });
     if (!threadId || !order.length) return;
     const index = order.indexOf(threadId);
     if (index === -1) return;
-    if (index === state.needs.length - 1 && state.hasMore) {
+    if (index === order.length - 1 && state.activeQueue === 'priority' && state.priorityHasMore) {
+      void autoLoadNextPriorityBatch();
+      return;
+    }
+    if (index === order.length - 1 && state.activeQueue !== 'priority' && state.hasMore) {
       autoLoadNextBatch();
       return;
     }
@@ -3005,10 +3045,13 @@
   function skipCurrent(source) {
     if (!state.activeId) return;
     const threadId = state.activeId;
-    const order = getReviewOrder();
+    const order = getReviewOrder({ queue: state.activeQueue });
     const index = order.indexOf(threadId);
     const hasRoomToAdvance = order.length > 1;
-    markReviewed(threadId);
+    const keepInPriority = state.priority.includes(threadId);
+    if (!keepInPriority) {
+      markReviewed(threadId);
+    }
     rebuildPriorityQueue();
     updateProgress();
     updateDrawerLists();
@@ -3018,34 +3061,62 @@
     closeTaskPanel(true);
     closeReplyPanel(true);
     clearPendingSuggestedAction(threadId);
-    const nextId = getNextUnreviewedAfter(threadId, {
+    const allowWrap = state.activeQueue === 'priority' ? !state.priorityHasMore : !state.hasMore;
+    let nextId = getNextUnreviewedAfter(threadId, {
       order,
       startIndex: index + 1,
-      allowWrap: !state.hasMore
+      allowWrap,
+      excludeId: threadId
     });
     if (nextId) {
       setActiveThread(nextId);
       return;
     }
-    if (state.hasMore) {
+    if (state.activeQueue === 'priority' && state.priorityHasMore) {
+      void autoLoadNextPriorityBatch();
+      return;
+    }
+    if (state.activeQueue !== 'priority' && state.hasMore) {
       autoLoadNextBatch();
       return;
     }
-    if (!hasRoomToAdvance) {
+    if (!hasRoomToAdvance && state.activeQueue !== 'priority') {
       setEmptyState('Inbox zero. You’re caught up.');
       toggleComposer(false);
       return;
     }
+    if (state.activeQueue === 'priority') {
+      const fallbackOrder = getReviewOrder({ queue: 'queue' });
+      const fallbackNextId = getNextUnreviewedAfter(threadId, {
+        order: fallbackOrder,
+        startIndex: Math.max(0, fallbackOrder.indexOf(threadId) + 1),
+        allowWrap: !state.hasMore,
+        excludeId: threadId
+      });
+      if (fallbackNextId) {
+        setActiveThread(fallbackNextId, { source: 'queue' });
+      }
+      return;
+    }
     const nextIndex = index === -1 ? 0 : (index + 1) % order.length;
     const fallbackId = order[nextIndex] || order[0];
-    if (fallbackId) {
-      setActiveThread(fallbackId);
-    }
+    if (fallbackId) setActiveThread(fallbackId);
   }
 
-  function getReviewOrder() {
+  function getReviewOrder(options = {}) {
+    const queue = options.queue || state.activeQueue;
+    if (queue === 'priority') {
+      const order = getPriorityOrder();
+      if (order.length) return order;
+    }
     if (!state.needs.length) return [];
     return sortThreadIdsByReceivedAt(state.needs);
+  }
+
+  function getPriorityOrder() {
+    if (!state.priority.length) return [];
+    const needsSet = new Set(state.needs);
+    return state.priority.filter(id => needsSet.has(id));
   }
 
   function sortThreadIdsByReceivedAt(ids) {
@@ -3058,8 +3129,8 @@
     });
   }
 
-  function getNextReviewCandidate() {
-    const order = getReviewOrder();
+  function getNextReviewCandidate(options = {}) {
+    const order = getReviewOrder(options);
     for (let i = 0; i < order.length; i += 1) {
       const candidate = order[i];
       if (!reviewedIds.has(candidate)) return candidate;
@@ -3075,15 +3146,67 @@
     const startIndex = providedStart !== null
       ? Math.max(0, providedStart)
       : Math.max(0, order.indexOf(threadId) + 1);
+    const excludeId = options.excludeId || '';
     const needsSet = new Set(state.needs);
     const maxOffset = allowWrap ? order.length : Math.max(0, order.length - startIndex);
     for (let offset = 0; offset < maxOffset; offset += 1) {
       const index = allowWrap ? (startIndex + offset) % order.length : startIndex + offset;
       const candidate = order[index];
+      if (excludeId && candidate === excludeId) continue;
       if (!needsSet.has(candidate)) continue;
       if (!reviewedIds.has(candidate)) return candidate;
     }
     return '';
+  }
+
+  async function autoLoadNextPriorityBatch() {
+    if (state.priorityLoadingMore || !state.priorityHasMore) return;
+    const added = await fetchNextPriorityPage('auto');
+    if (added.length) {
+      const order = getReviewOrder({ queue: 'priority' });
+      const startIndex = Math.max(0, order.indexOf(state.activeId) + 1);
+      const nextId = getNextUnreviewedAfter(state.activeId, {
+        order,
+        startIndex,
+        allowWrap: true,
+        excludeId: state.activeId
+      });
+      if (nextId) setActiveThread(nextId, { source: 'priority' });
+    }
+  }
+
+  function syncQueueToggles() {
+    setQueueToggleState(refs.priorityQueue, refs.priorityToggle);
+    setQueueToggleState(refs.reviewQueue, refs.queueToggle);
+  }
+
+  function setQueueToggleState(queueEl, toggleBtn) {
+    if (!queueEl || !toggleBtn) return;
+    const isCollapsed = queueEl.classList.contains('is-collapsed');
+    toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
+    toggleBtn.textContent = isCollapsed ? 'View all' : 'Collapse';
+  }
+
+  function setQueueCollapsed(queueEl, toggleBtn, isCollapsed) {
+    if (!queueEl || !toggleBtn) return;
+    queueEl.classList.toggle('is-collapsed', isCollapsed);
+    setQueueToggleState(queueEl, toggleBtn);
+  }
+
+  function toggleQueueSection(section) {
+    if (section === 'priority') {
+      const isCollapsed = refs.priorityQueue?.classList.contains('is-collapsed');
+      setQueueCollapsed(refs.priorityQueue, refs.priorityToggle, !isCollapsed);
+      return;
+    }
+    if (section === 'review') {
+      const isCollapsed = refs.reviewQueue?.classList.contains('is-collapsed');
+      const nextCollapsed = !isCollapsed;
+      if (!nextCollapsed && refs.priorityQueue && !refs.priorityQueue.classList.contains('is-collapsed')) {
+        setQueueCollapsed(refs.priorityQueue, refs.priorityToggle, true);
+      }
+      setQueueCollapsed(refs.reviewQueue, refs.queueToggle, nextCollapsed);
+    }
   }
 
   function handleAutoIntent(intent, userText, options = {}) {
