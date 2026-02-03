@@ -162,7 +162,7 @@ function fallbackAutoSummary(input: {
 }): AutoSummaryResult {
   const mustKnow = normalizeText(input.summary || input.headline || input.subject || 'New email in your inbox.');
   const prompt = actionPrompt('skip');
-  const action = { actionType: 'skip', userFacingPrompt: prompt };
+  const action: SuggestedActionPayload = { actionType: 'skip', userFacingPrompt: prompt };
   return { mustKnow, suggestedAction: action, suggestedActions: [action] };
 }
 

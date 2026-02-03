@@ -13,7 +13,7 @@ export type PriorityItem = {
   summary: Summary | null;
 };
 
-export const ACTIONABLE_ACTION_TYPES = ['reply', 'task', 'schedule'] as const;
+export const ACTIONABLE_ACTION_TYPES = ['reply', 'task', 'schedule'];
 
 export function priorityQueueWhere(userId: string) {
   return {
