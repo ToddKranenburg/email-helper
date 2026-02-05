@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { type ActionType, type ExternalActionPayload } from '../actions/persistence.js';
+import { formatUserIdentity, type UserIdentity } from './userContext.js';
 
 export type SuggestedActionPayload = {
   actionType: ActionType;
@@ -38,7 +39,8 @@ Rules:
 - UNSUBSCRIBE is only for promotional/bulk email that clearly provides a list-unsubscribe option.
 - "suggested_actions[].external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
 - "suggested_actions[].external_action.links": 1-3 items for OPEN_LINK. Omit or leave empty for EXTERNAL_ACTION.
-- If action_type is NONE, still include it in suggested_actions with a brief userFacingPrompt.`;
+- If action_type is NONE, still include it in suggested_actions with a brief userFacingPrompt.
+- The user's identity is provided; treat messages from the user's email as sent by the user, and treat mentions of their name/email as referring to the user.`;
 
 const TASK_DRAFT_PROMPT = `You draft Google Tasks from an email thread.
 Output STRICT JSON: {"title":"...","notes":"...","dueDate":"YYYY-MM-DD or null"}
@@ -55,6 +57,7 @@ export async function generateAutoSummary(input: {
   nextStep: string;
   participants: string[];
   transcript: string;
+  user?: UserIdentity | null;
 }): Promise<AutoSummaryResult> {
   const context = buildContext(input);
   if (!openai) {
@@ -87,6 +90,7 @@ export async function generateTaskDraft(input: {
   nextStep: string;
   participants?: string[];
   transcript: string;
+  user?: UserIdentity | null;
 }): Promise<TaskDraft> {
   const context = buildContext(input);
   if (!openai) return fallbackDraft(input);
@@ -116,16 +120,19 @@ function buildContext(input: {
   nextStep: string;
   participants?: string[];
   transcript: string;
+  user?: UserIdentity | null;
 }) {
   const participants = input.participants?.length ? input.participants.join(', ') : 'Unknown participants';
   const trimmedTranscript = input.transcript?.length > 6000
     ? input.transcript.slice(-6000)
     : input.transcript || '(no transcript provided)';
+  const userIdentity = formatUserIdentity(input.user);
   return `Subject: ${input.subject || '(no subject)'}
 Headline: ${input.headline || '(no headline)'}
 Summary: ${input.summary || '(no summary)'}
 Next step: ${input.nextStep || 'No action specified'}
 Participants: ${participants}
+${userIdentity}
 
 Thread (oldest→newest):
 ${trimmedTranscript}`;

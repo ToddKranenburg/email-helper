@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { formatUserIdentity, type UserIdentity } from './userContext.js';
 
 export type ReplyDraftResult = {
   body: string;
@@ -16,6 +17,8 @@ Output STRICT JSON: {"body":"...","confidence":0-1,"safe_to_draft":true|false,"r
 Rules:
 - Never invent names, dates, numbers, commitments, or facts not explicitly stated in the transcript.
 - If any detail needed to reply is missing or ambiguous, return body="" and safe_to_draft=false with confidence <= 0.3.
+- You are writing as the user (the account owner). Use first-person voice.
+- Use the provided user identity to interpret who "you" refers to; messages from the user's email are sent by the user.
 - Do not include a greeting or signature. The reply body should be ready to paste after a greeting.
 - Keep it under 120 words. Use plain text only (no markdown).`;
 
@@ -26,6 +29,8 @@ Rules:
 - Be creative in phrasing (do not copy the user's words verbatim), while preserving meaning.
 - Never invent names, dates, numbers, commitments, or facts not in the transcript or user instruction.
 - If information is missing or ambiguous, ask one concise clarifying question instead of guessing.
+- You are writing as the user (the account owner). Use first-person voice.
+- Use the provided user identity to interpret who "you" refers to; messages from the user's email are sent by the user.
 - Do not include a greeting or signature. The reply body should be ready to paste after a greeting.
 - Keep it under 120 words. Use plain text only (no markdown).`;
 
@@ -44,6 +49,7 @@ export async function generateReplyDraft(input: {
   participants: string[];
   transcript: string;
   fromLine?: string;
+  user?: UserIdentity | null;
 }): Promise<ReplyDraftResult> {
   const context = buildContext(input);
   if (!openai) return FALLBACK;
@@ -75,6 +81,7 @@ export async function generateGuidedReplyDraft(input: {
   transcript: string;
   fromLine?: string;
   userInstruction: string;
+  user?: UserIdentity | null;
 }): Promise<ReplyDraftResult> {
   const context = buildGuidedContext(input);
   if (!openai) return FALLBACK;
@@ -105,14 +112,17 @@ function buildContext(input: {
   participants: string[];
   transcript: string;
   fromLine?: string;
+  user?: UserIdentity | null;
 }) {
   const participants = input.participants?.length ? input.participants.join(', ') : 'Unknown participants';
   const trimmedTranscript = input.transcript?.length > 9000
     ? input.transcript.slice(-9000)
     : input.transcript || '(no transcript provided)';
+  const userIdentity = formatUserIdentity(input.user);
   return `Subject: ${input.subject || '(no subject)'}
 Participants: ${participants}
 Sender line: ${input.fromLine || '(unknown sender)'}
+${userIdentity}
 
 Thread (oldest to newest):
 ${trimmedTranscript}`;
@@ -127,6 +137,7 @@ function buildGuidedContext(input: {
   transcript: string;
   fromLine?: string;
   userInstruction: string;
+  user?: UserIdentity | null;
 }) {
   const participants = input.participants?.length ? input.participants.join(', ') : 'Unknown participants';
   const trimmedTranscript = input.transcript?.length > 9000
@@ -139,9 +150,11 @@ function buildGuidedContext(input: {
   const extraContext = [headline && `Headline: ${headline}`, summary && `Summary: ${summary}`, nextStep && `Next step: ${nextStep}`]
     .filter(Boolean)
     .join('\n');
+  const userIdentity = formatUserIdentity(input.user);
   return `Subject: ${input.subject || '(no subject)'}
 Participants: ${participants}
 Sender line: ${input.fromLine || '(unknown sender)'}
+${userIdentity}
 User instruction: ${instruction}
 ${extraContext ? `\n${extraContext}` : ''}
 

@@ -97,13 +97,15 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
     }
   }
 
+  const userIdentity = await fetchUserIdentity(ctx.userId);
   const generated = await generateAutoSummary({
     subject: ctx.subject,
     headline: ctx.headline,
     summary: ctx.summary,
     nextStep: ctx.nextStep,
     participants: ctx.participants,
-    transcript: ctx.transcript
+    transcript: ctx.transcript,
+    user: userIdentity
   });
 
   let suggestedActions = Array.isArray(generated.suggestedActions) && generated.suggestedActions.length
@@ -213,12 +215,14 @@ export async function generateDraftDetails(ctx: {
   transcript: string;
   lastMessageId?: string;
 }) {
+  const userIdentity = await fetchUserIdentity(ctx.userId);
   const draft = await generateTaskDraft({
     subject: ctx.subject,
     headline: ctx.headline,
     summary: ctx.summary,
     nextStep: ctx.nextStep,
-    transcript: ctx.transcript
+    transcript: ctx.transcript,
+    user: userIdentity
   });
   const payload = sanitizeDraft(draft);
   const result = await prisma.$transaction(async tx => {
@@ -377,4 +381,15 @@ function unpackPayload(raw?: string | null) {
   } catch {
     return null;
   }
+}
+
+async function fetchUserIdentity(userId: string) {
+  const [user, gmailAccount] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } }),
+    prisma.gmailAccount.findUnique({ where: { userId }, select: { emailAddress: true } })
+  ]);
+  const name = user?.name ?? null;
+  const email = user?.email ?? gmailAccount?.emailAddress ?? null;
+  if (!name && !email) return null;
+  return { name, email };
 }

@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { formatUserIdentity, type UserIdentity } from './userContext.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -46,7 +47,8 @@ CONSTRAINTS:
 - "tldr": 1–2 lines, concise, no emojis.
 - "next_step": a short imperative ("RSVP by Friday", "Reply with availability", "No action").
   Use "No action" when nothing is required.
-- "confidence": High | Medium | Low (your confidence in category and next_step).`;
+- "confidence": High | Medium | Low (your confidence in category and next_step).
+- The user's identity is provided; treat messages from the user's email as sent by the user, and treat mentions of their name/email as referring to the user.`;
 
 /** Extract JSON even if wrapped in fences or with noise. */
 function extractJSONObject(s: string) {
@@ -170,9 +172,12 @@ export async function summarize(input: {
   subject: string;
   people: string[];
   convoText: string;
+  user?: UserIdentity | null;
 }) {
+  const userIdentity = formatUserIdentity(input.user);
   const user = `Subject: ${input.subject}
 Participants: ${input.people.join(', ')}
+${userIdentity}
 
 Thread (oldest→newest):
 ${input.convoText.slice(0, 6000)}

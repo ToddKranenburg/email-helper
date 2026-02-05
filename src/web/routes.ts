@@ -8,7 +8,7 @@ import path from 'node:path';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
 import { gmailClient } from '../gmail/client.js';
 import { getAuthedClient, getMissingGmailScopes, MissingScopeError } from '../auth/google.js';
-import { normalizeBody } from '../gmail/normalize.js';
+import { buildTranscript } from '../gmail/transcript.js';
 import { extractUnsubscribeMetadata, parseMailto } from '../gmail/unsubscribe.js';
 import { GaxiosError } from 'gaxios';
 import { performance } from 'node:perf_hooks';
@@ -324,7 +324,8 @@ router.post('/secretary/chat', async (req: Request, res: Response) => {
       participants: context.participants,
       transcript: context.transcript,
       history,
-      question
+      question,
+      user: { name: sessionData.user?.name ?? null, email: sessionData.user?.email ?? null }
     });
     res.json({ reply });
   } catch (err) {
@@ -389,7 +390,8 @@ router.post('/secretary/review', async (req: Request, res: Response) => {
       participants: context.participants,
       transcript: context.transcript,
       history: [],
-      question: REVIEW_PROMPT
+      question: REVIEW_PROMPT,
+      user: { name: sessionData.user?.name ?? null, email: sessionData.user?.email ?? null }
     });
     return res.json({ review });
   } catch (err) {
@@ -419,7 +421,8 @@ router.post('/secretary/reply-draft', async (req: Request, res: Response) => {
       nextStep: context.summary.nextStep,
       participants: context.participants,
       transcript: context.transcript,
-      fromLine: formatSender(context.summary.threadIndex)
+      fromLine: formatSender(context.summary.threadIndex),
+      user: { name: sessionData.user?.name ?? null, email: sessionData.user?.email ?? null }
     });
     const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
     const signoffUser = await resolveUserForSignoff(sessionData);
@@ -461,7 +464,8 @@ router.post('/secretary/reply-intent-draft', async (req: Request, res: Response)
       participants: context.participants,
       transcript: context.transcript,
       fromLine: formatSender(context.summary.threadIndex),
-      userInstruction: text
+      userInstruction: text,
+      user: { name: sessionData.user?.name ?? null, email: sessionData.user?.email ?? null }
     });
     const eligible = Boolean(draft.safeToDraft && draft.body && draft.confidence >= REPLY_DRAFT_MIN_CONFIDENCE);
     const signoffUser = await resolveUserForSignoff(sessionData);
@@ -641,7 +645,8 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
         participants: context.participants,
         transcript: context.transcript,
         history: [],
-        question: 'Share extra context and clarifications about this email. List any open questions or missing details.'
+        question: 'Share extra context and clarifications about this email. List any open questions or missing details.',
+        user: { name: sessionData.user?.name ?? null, email: sessionData.user?.email ?? null }
       });
       const flow = await prisma.actionFlow.upsert({
         where: { userId_threadId: { userId: sessionData.user.id, threadId } },
@@ -1333,11 +1338,7 @@ async function fetchTranscript(threadId: string, req: Request) {
     const gmail = gmailClient(auth);
     const thread = await gmail.users.threads.get({ userId: 'me', id: threadId });
     const messages = (thread.data.messages || []).slice(-3);
-    return messages
-      .map(msg => normalizeBody(msg.payload))
-      .filter(Boolean)
-      .reverse()
-      .join('\\n\\n---\\n\\n');
+    return buildTranscript(messages.slice().reverse());
   } catch (err) {
     console.error('Failed to fetch Gmail transcript', err);
     return '';
@@ -1365,6 +1366,14 @@ async function loadThreadContext(userId: string, threadId: string, req: Request)
     if (transcript) {
       await prisma.summary.update({ where: { id: summary.id }, data: { convoText: transcript } });
       summary.convoText = transcript;
+    }
+  }
+  if (transcript && !/^\s*From:/m.test(transcript)) {
+    const refreshed = await fetchTranscript(threadId, req);
+    if (refreshed) {
+      await prisma.summary.update({ where: { id: summary.id }, data: { convoText: refreshed } });
+      summary.convoText = refreshed;
+      transcript = refreshed;
     }
   }
   const participants = parseParticipants(summary.threadIndex?.participants);

@@ -1,7 +1,7 @@
 import type { gmail_v1 } from 'googleapis';
 import type { OAuth2Client } from 'google-auth-library';
 import { gmailClient } from './client.js';
-import { normalizeBody } from './normalize.js';
+import { buildTranscript } from './transcript.js';
 import { extractUnsubscribeMetadata } from './unsubscribe.js';
 import { prisma } from '../store/db.js';
 import type { Summary, ThreadIndex } from '@prisma/client';
@@ -99,11 +99,7 @@ export async function ensureThreadSummary(
   const inPrimaryInbox = labelIds.includes('INBOX') && labelIds.includes('CATEGORY_PRIMARY') && !labelIds.includes('CHAT');
   const unsubscribe = extractUnsubscribeMetadata(latestHeaders);
 
-  const convoText = recent
-    .map(msg => normalizeBody(msg.payload))
-    .filter(Boolean)
-    .reverse()
-    .join('\n\n---\n\n');
+  const convoText = buildTranscript(recent.slice().reverse());
 
   if (!threadIndex) {
     const lastMessageDate = new Date(latest.internalDate ? Number(latest.internalDate) : Date.now());
@@ -140,7 +136,15 @@ export async function ensureThreadSummary(
     return existingLatest;
   }
 
-  const s = await summarize({ subject, people: participants, convoText });
+  const [userRecord, gmailAccount] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } }),
+    prisma.gmailAccount.findUnique({ where: { userId }, select: { emailAddress: true } })
+  ]);
+  const userIdentity = {
+    name: userRecord?.name ?? null,
+    email: userRecord?.email ?? gmailAccount?.emailAddress ?? null
+  };
+  const s = await summarize({ subject, people: participants, convoText, user: userIdentity });
   const created = await prisma.summary.create({
     data: {
       threadId,
