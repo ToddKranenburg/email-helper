@@ -2,7 +2,7 @@ import { Prisma, type ActionFlow, type TranscriptMessage } from '@prisma/client'
 import { prisma } from '../store/db.js';
 import { AutoSummaryResult, generateAutoSummary, generateTaskDraft, TaskDraft } from '../llm/autoActions.js';
 
-export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'external_action' | 'reply' | 'unsubscribe';
+export type ActionType = 'archive' | 'create_task' | 'more_info' | 'skip' | 'open_link' | 'external_action' | 'reply' | 'unsubscribe';
 export type ActionState = 'suggested' | 'draft_ready' | 'editing' | 'executing' | 'completed' | 'failed';
 export type TranscriptType =
   | 'must_know'
@@ -118,8 +118,10 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
   let actionType: ActionType = suggestedActions[0]?.actionType || 'skip';
   let externalAction = suggestedActions[0]?.externalAction || null;
   let prompt = suggestedActions[0]?.userFacingPrompt
-    || (actionType === 'external_action'
-      ? 'This needs your attention outside the app. Here are the key links.'
+    || (actionType === 'open_link'
+      ? 'There are important links to visit in this email.'
+      : actionType === 'external_action'
+        ? 'This needs your attention outside the app.'
       : actionType === 'reply'
         ? 'Draft a reply to the sender?'
         : actionType === 'unsubscribe'
@@ -138,14 +140,6 @@ export async function ensureAutoSummaryCards(ctx: AutoSummaryContext, opts: { fo
     externalAction = null;
     prompt = 'Unsubscribe from this sender to stop these promos?';
     suggestedActions = [{ actionType, userFacingPrompt: prompt, externalAction: null }];
-  }
-
-  if (suggestedActions.some(action => action.actionType === 'external_action')) {
-    const externalOnly = suggestedActions.find(action => action.actionType === 'external_action');
-    suggestedActions = externalOnly ? [externalOnly] : suggestedActions;
-    actionType = suggestedActions[0]?.actionType || actionType;
-    externalAction = suggestedActions[0]?.externalAction || externalAction;
-    prompt = suggestedActions[0]?.userFacingPrompt || prompt;
   }
 
   if (suggestedActions.length > 1) {

@@ -818,6 +818,57 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       }
     }
 
+    if (actionType === 'open_link') {
+      const links = normalizeOpenLinkInput(req.body?.links);
+      const count = links.length;
+      const flow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+      const message = count
+        ? `Opened ${count} link${count === 1 ? '' : 's'} in new tab${count === 1 ? '' : 's'}.`
+        : 'Opened the suggested link in a new tab.';
+      await appendActionResult(sessionData.user.id, threadId, message, count ? { links } : null);
+      const timeline = await fetchTimeline(sessionData.user.id, threadId);
+      return res.json({ status: 'opened', flow, timeline });
+    }
+
+    if (actionType === 'external_action') {
+      const flow = await prisma.actionFlow.upsert({
+        where: { userId_threadId: { userId: sessionData.user.id, threadId } },
+        update: {
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        },
+        create: {
+          userId: sessionData.user.id,
+          threadId,
+          actionType,
+          state: 'completed',
+          draftPayload: null,
+          lastMessageId: context.summary.lastMsgId
+        }
+      });
+      await appendActionResult(sessionData.user.id, threadId, 'Confirmed. Marked as done.');
+      const timeline = await fetchTimeline(sessionData.user.id, threadId);
+      return res.json({ status: 'confirmed', flow, timeline });
+    }
+
     if (actionType === 'create_task') {
       const draftInput = normalizeDraftInput(req.body?.draft);
       const existingFlow = await prisma.actionFlow.findUnique({
@@ -1335,10 +1386,17 @@ function parseParticipants(raw?: string | null): string[] {
 
 function normalizeActionTypeInput(raw: unknown): ActionType | null {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip' || value === 'reply' || value === 'unsubscribe') {
+  if (value === 'archive' || value === 'create_task' || value === 'more_info' || value === 'skip' || value === 'reply' || value === 'unsubscribe' || value === 'open_link' || value === 'external_action') {
     return value as ActionType;
   }
   return null;
+}
+
+function normalizeOpenLinkInput(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(item => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
 }
 
 function normalizeDraftInput(raw: any): { title: string; notes: string; dueDate: string | null } {

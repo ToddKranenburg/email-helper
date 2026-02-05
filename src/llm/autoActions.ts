@@ -25,18 +25,19 @@ const openai = process.env.OPENAI_API_KEY
 
 const AUTO_SUMMARY_PROMPT = `You summarize email threads for a busy professional and propose a short ordered sequence of actions.
 Output STRICT JSON:
-{"must_know":"<plain text essentials only>","suggested_actions":[{"action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|REPLY|EXTERNAL_ACTION|UNSUBSCRIBE|NONE","userFacingPrompt":"<concise action prompt>","external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}]}
+{"must_know":"<plain text essentials only>","suggested_actions":[{"action_type":"ARCHIVE|CREATE_TASK|MORE_INFO|REPLY|OPEN_LINK|EXTERNAL_ACTION|UNSUBSCRIBE|NONE","userFacingPrompt":"<concise action prompt>","external_action":{"steps":"<1-2 sentences>","links":[{"label":"<human readable>","url":"https://..."}]}}]}
 Rules:
 - "must_know": concise, essential content only (no actions, no emojis, no markdown).
 - "suggested_actions": 1-3 items, in the exact order the user should do them. Prefer ARCHIVE when no action is needed. Use NONE only for truly ignorable content.
 - "suggested_actions[].userFacingPrompt": required when action_type is ARCHIVE/CREATE_TASK/MORE_INFO/REPLY/UNSUBSCRIBE. Keep it short, direct, and explicitly mention the action being suggested (e.g., for ARCHIVE say to archive). No markdown, no quotes, no emojis.
-- "suggested_actions[].external_action": only include when action_type is EXTERNAL_ACTION.
-- EXTERNAL_ACTION is for meaningful user actions outside the app (security alerts, verification, compliance, account lock risk, past-due notices, required RSVP/forms). Marketing/promotional CTAs like “buy now”, “upgrade”, “shop” must NOT trigger EXTERNAL_ACTION.
-- CREATE_TASK is only for reminders when the email cannot be resolved immediately and the user should handle it later (future follow-ups, deadlines, planned check-ins). If there is a direct link to take action now (review budget, verify account, RSVP, submit form), prefer EXTERNAL_ACTION.
+- "suggested_actions[].external_action": include when action_type is OPEN_LINK or EXTERNAL_ACTION.
+- OPEN_LINK is for meaningful user actions that require visiting one or more links. If the email includes a specific URL that the user should review (logs, dashboards, reports, incident details, verification pages, forms), choose OPEN_LINK and include those links.
+- EXTERNAL_ACTION is for meaningful offline actions with no required link (call someone, visit an office, bring documents). If links are provided for the action, prefer OPEN_LINK instead.
+- CREATE_TASK is only for reminders when the email cannot be resolved immediately and the user should handle it later (future follow-ups, deadlines, planned check-ins). If there is a direct link to take action now (review budget, verify account, RSVP, submit form), prefer OPEN_LINK.
 - REPLY is for straightforward responses the user can handle by email without external steps.
 - UNSUBSCRIBE is only for promotional/bulk email that clearly provides a list-unsubscribe option.
 - "suggested_actions[].external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
-- "suggested_actions[].external_action.links": 1-3 items. Prefer explicit account/security/action URLs from the email. Avoid generic homepage links.
+- "suggested_actions[].external_action.links": 1-3 items for OPEN_LINK. Omit or leave empty for EXTERNAL_ACTION.
 - If action_type is NONE, still include it in suggested_actions with a brief userFacingPrompt.`;
 
 const TASK_DRAFT_PROMPT = `You draft Google Tasks from an email thread.
@@ -210,14 +211,14 @@ function normalizeSuggestedActions(raw: any): SuggestedActionPayload[] {
         raw?.suggested_action?.action_type
     );
     const prompt = normalizeText(raw?.suggested_action?.userFacingPrompt || raw?.suggested_action?.prompt);
-    const externalAction = actionType === 'external_action' ? topLevelExternal : null;
+    const externalAction = actionType === 'open_link' || actionType === 'external_action'
+      ? topLevelExternal
+      : null;
     const fallback = buildSuggestedAction(actionType, prompt, externalAction);
     if (fallback) actions.push(fallback);
   }
 
   const deduped = dedupeSuggestedActions(actions).slice(0, 3);
-  const externalOnly = deduped.find(action => action.actionType === 'external_action');
-  if (externalOnly) return [externalOnly];
   return deduped;
 }
 
@@ -225,7 +226,7 @@ function normalizeSuggestedActionEntry(entry: any): SuggestedActionPayload | nul
   if (!entry || typeof entry !== 'object') return null;
   const actionType = normalizeActionType(entry.action_type || entry.actionType);
   const prompt = normalizeText(entry.userFacingPrompt || entry.prompt);
-  const externalAction = actionType === 'external_action'
+  const externalAction = actionType === 'open_link' || actionType === 'external_action'
     ? normalizeExternalAction(entry.external_action || entry.externalAction)
     : null;
   return buildSuggestedAction(actionType, prompt, externalAction);
@@ -239,7 +240,7 @@ function buildSuggestedAction(
   if (!actionType) return null;
   let finalPrompt = prompt;
   if (!finalPrompt) {
-    if (actionType === 'external_action') {
+    if (actionType === 'open_link' || actionType === 'external_action') {
       finalPrompt = normalizeText(externalAction?.steps);
     } else {
       finalPrompt = actionPrompt(actionType);
@@ -250,6 +251,7 @@ function buildSuggestedAction(
     finalPrompt = actionPrompt('archive');
   }
   if (actionType === 'external_action' && !externalAction?.steps) return null;
+  if (actionType === 'open_link' && (!externalAction?.steps || !externalAction?.links?.length)) return null;
   return { actionType, userFacingPrompt: finalPrompt, externalAction };
 }
 
@@ -271,7 +273,9 @@ function normalizeText(value: unknown) {
 function normalizeActionType(value: unknown): ActionType | null {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (text === 'none') return 'archive';
-  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip' || text === 'external_action' || text === 'reply' || text === 'unsubscribe') {
+  if (text === 'open link') return 'open_link';
+  if (text === 'external_action') return 'external_action';
+  if (text === 'archive' || text === 'create_task' || text === 'more_info' || text === 'skip' || text === 'open_link' || text === 'external_action' || text === 'reply' || text === 'unsubscribe') {
     return text as ActionType;
   }
   return null;
@@ -303,7 +307,8 @@ function actionPrompt(action: ActionType) {
   if (action === 'archive') return 'Archive this thread to keep your inbox clear?';
   if (action === 'create_task') return 'Draft a quick task so this stays on your radar?';
   if (action === 'more_info') return 'Want me to pull more context or clarifications?';
-  if (action === 'external_action') return 'This needs your attention outside the app. Want the key links?';
+  if (action === 'open_link') return 'Open the suggested link(s) from this email?';
+  if (action === 'external_action') return 'Confirm this offline action?';
   if (action === 'reply') return 'Draft a reply to the sender so you can respond quickly?';
   if (action === 'unsubscribe') return 'Unsubscribe from this sender to stop these promos?';
   return 'Skip for now and move to the next email?';

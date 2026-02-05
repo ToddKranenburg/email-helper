@@ -11,7 +11,7 @@ export type ArchiveIntentDecision = {
   source: 'model' | 'heuristic';
 };
 
-export type SecretaryIntent = 'archive' | 'skip' | 'create_task' | 'reply' | 'unsubscribe' | 'none';
+export type SecretaryIntent = 'archive' | 'skip' | 'create_task' | 'reply' | 'unsubscribe' | 'open_link' | 'none';
 
 export type SecretaryIntentDecision = {
   intent: SecretaryIntent;
@@ -26,8 +26,9 @@ const INTENT_PROMPT = `Classify the user's ask for an email assistant.
 - "create_task": They want to create a task/reminder/todo based on this email (treat "reminder" or "remind me" the same as create_task).
 - "reply": They want to reply or send a response to the sender.
 - "unsubscribe": They want to unsubscribe or opt out of promotional emails from this sender.
+- "open_link": They want to open or visit a link from this email.
 - "none": Anything else (questions, drafts, summaries, etc.).
-Return JSON: {"intent":"archive|skip|create_task|reply|unsubscribe|none","confidence":0-1,"reason":"short phrase"}. Keep it concise.`;
+Return JSON: {"intent":"archive|skip|create_task|reply|unsubscribe|open_link|none","confidence":0-1,"reason":"short phrase"}. Keep it concise.`;
 
 export async function detectArchiveIntent(userText: string): Promise<ArchiveIntentDecision> {
   const decision = await classifyIntent(userText);
@@ -46,21 +47,24 @@ export async function classifyIntent(userText: string): Promise<SecretaryIntentD
   }
 
   const unsubscribeGuess = heuristicUnsubscribe(text);
+  const openLinkGuess = heuristicOpenLink(text);
   const archiveGuess = heuristicArchive(text);
   const taskGuess = heuristicTask(text);
   const replyGuess = heuristicReply(text);
   const skipGuess = heuristicSkip(text, taskGuess, replyGuess);
   const fallbackIntent: SecretaryIntent = unsubscribeGuess
     ? 'unsubscribe'
-    : archiveGuess
-      ? 'archive'
-      : taskGuess
-        ? 'create_task'
-        : replyGuess
-          ? 'reply'
-          : skipGuess
-            ? 'skip'
-            : 'none';
+    : openLinkGuess
+      ? 'open_link'
+      : archiveGuess
+        ? 'archive'
+        : taskGuess
+          ? 'create_task'
+          : replyGuess
+            ? 'reply'
+            : skipGuess
+              ? 'skip'
+              : 'none';
 
   if (!openai) {
     return {
@@ -124,7 +128,7 @@ function parseIntentDecision(payload: string): SecretaryIntentDecision | null {
 
 function normalizeIntent(value: unknown): SecretaryIntent | null {
   const val = typeof value === 'string' ? value.toLowerCase().trim() : '';
-  if (val === 'archive' || val === 'skip' || val === 'create_task' || val === 'reply' || val === 'unsubscribe' || val === 'none') return val;
+  if (val === 'archive' || val === 'skip' || val === 'create_task' || val === 'reply' || val === 'unsubscribe' || val === 'open_link' || val === 'none') return val;
   return null;
 }
 
@@ -237,6 +241,31 @@ function heuristicUnsubscribe(text: string): boolean {
     'no more emails',
     'no more promos',
     'take me off this list'
+  ];
+  return phrases.some(phrase => cleaned.includes(phrase));
+}
+
+function heuristicOpenLink(text: string): boolean {
+  const cleaned = text.replace(/[.!?]/g, ' ').toLowerCase().trim();
+  if (!cleaned) return false;
+  const phrases = [
+    'open link',
+    'open the link',
+    'open links',
+    'open the links',
+    'visit link',
+    'visit the link',
+    'visit links',
+    'visit the links',
+    'go to link',
+    'go to the link',
+    'click link',
+    'click the link',
+    'open url',
+    'open website',
+    'take me to the link',
+    'open the url',
+    'open the site'
   ];
   return phrases.some(phrase => cleaned.includes(phrase));
 }

@@ -31,10 +31,10 @@
           <li class="queue-empty priority-empty">No urgent emails right now.</li>
         </ul>
       </aside>
-      <aside class="review-queue queue-collapsible is-collapsed" id="review-queue" aria-label="Inbox">
+      <aside class="review-queue queue-collapsible is-collapsed" id="review-queue" aria-label="Full Inbox">
         <div class="review-queue-head">
           <div>
-            <p class="review-label">Inbox</p>
+            <p class="review-label">Full Inbox</p>
             <p class="review-count" id="queue-pill-text">All done</p>
           </div>
           <div class="review-meta">
@@ -85,6 +85,10 @@
               <button class="triage-btn unsubscribe" id="action-unsubscribe" type="button">
                 <span class="action-icon" aria-hidden="true">🔕</span>
                 <span>Unsubscribe</span>
+              </button>
+              <button class="triage-btn open-link" id="action-open-link" type="button">
+                <span class="action-icon" aria-hidden="true">🔗</span>
+                <span>Open link</span>
               </button>
               <button class="triage-btn task" id="action-task" type="button">
                 <span class="action-icon" aria-hidden="true">📝</span>
