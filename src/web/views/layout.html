@@ -1803,15 +1803,16 @@
     const loadingText = overlay ? overlay.querySelector('.loading-text') : null;
     let ingestInFlight = false;
 
-    async function triggerIngest() {
+    async function triggerIngest(options = {}) {
       if (!form || ingestInFlight) return;
+      const { showOverlay = true, reloadOnDone = true } = options || {};
       ingestInFlight = true;
       if (errorBox) {
         errorBox.textContent = '';
         errorBox.classList.add('hidden');
       }
-      if (overlay) overlay.classList.remove('hidden');
-      setLoadingText('Syncing Gmail…');
+      if (overlay && showOverlay) overlay.classList.remove('hidden');
+      if (showOverlay) setLoadingText('Syncing Gmail…');
       try {
         const resp = await fetch(form.action || '/ingest', {
           method: 'POST',
@@ -1824,13 +1825,13 @@
           throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
         }
         if (data?.status === 'done') {
-          window.location.reload();
+          if (reloadOnDone) window.location.reload();
           return;
         }
-        await pollIngestStatus();
+        await pollIngestStatus({ showOverlay, reloadOnDone });
       } catch (err) {
         console.error('Inbox ingest failed', err);
-        if (overlay) overlay.classList.add('hidden');
+        if (overlay && showOverlay) overlay.classList.add('hidden');
         if (errorBox) {
           errorBox.textContent = err instanceof Error ? err.message : 'Unable to sync your Gmail inbox right now. Please try again.';
           errorBox.classList.remove('hidden');
@@ -1840,14 +1841,15 @@
       }
     }
 
-    async function pollIngestStatus(attempt = 0) {
+    async function pollIngestStatus(options = {}, attempt = 0) {
       const MAX_ATTEMPTS = 120; // ~2 minutes
+      const { showOverlay = true, reloadOnDone = true } = options || {};
       if (attempt > MAX_ATTEMPTS) {
         throw new Error('Sync is taking longer than expected. Please try again.');
       }
       await wait(1000);
       try {
-        setLoadingText('Still syncing…');
+        if (showOverlay) setLoadingText('Still syncing…');
         const resp = await fetch('/ingest/status', {
           method: 'GET',
           credentials: 'same-origin',
@@ -1859,8 +1861,8 @@
           throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
         }
         if (data?.status === 'done') {
-          setLoadingText('Finishing up…');
-          window.location.reload();
+          if (showOverlay) setLoadingText('Finishing up…');
+          if (reloadOnDone) window.location.reload();
           return;
         }
         if (data?.status === 'error') {
@@ -1870,7 +1872,7 @@
         if (data?.status === 'unauthorized') {
           throw new Error('Please re-authenticate with Google to sync.');
         }
-        return pollIngestStatus(attempt + 1);
+        return pollIngestStatus({ showOverlay, reloadOnDone }, attempt + 1);
       } catch (err) {
         throw err;
       }
@@ -1893,11 +1895,14 @@
 
     // Auto-ingest after first render if server says we're empty (first-time auth)
     if (window.AUTO_INGEST && form) {
+      const isFtue = Boolean(window.FTUE_ONBOARDING);
       // Give the DOM a tick to paint the existing UI, then trigger ingest.
       requestAnimationFrame(() => {
-        triggerIngest();
+        triggerIngest({ showOverlay: !isFtue, reloadOnDone: !isFtue });
       });
     }
+
+    window.triggerIngest = triggerIngest;
   });
 </script>
 

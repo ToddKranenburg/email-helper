@@ -205,7 +205,11 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   if (hasSummaries) {
     sessionData.skipAutoIngest = true;
   }
-  const autoIngest = !hasSummaries && !sessionData.skipAutoIngest;
+  const forceFtue = Boolean(sessionData.ftueAutoIngest);
+  const autoIngest = forceFtue || (!hasSummaries && !sessionData.skipAutoIngest);
+  if (forceFtue) {
+    sessionData.ftueAutoIngest = false;
+  }
 
   const templateStart = performance.now();
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
@@ -252,7 +256,10 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null },
     priorityMeta
   )}
-  <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
+  <script>
+    window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};
+    window.FTUE_ONBOARDING = ${autoIngest ? 'true' : 'false'};
+  </script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
   log('html rendered', { durationMs: elapsedMs(renderStart) });

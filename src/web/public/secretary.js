@@ -8,6 +8,8 @@
   const priorityBatchFinishedAt = typeof bootstrap.priorityBatchFinishedAt === 'string'
     ? bootstrap.priorityBatchFinishedAt
     : null;
+  const FTUE_ENABLED = Boolean(window.FTUE_ONBOARDING);
+  const FTUE_THREAD_ID = '__ftue__';
   const priorityItems = normalizePriorityItems(priorityPayload);
   const hasServerPriority = Array.isArray(bootstrap.priority);
   const MAX_TURNS = typeof bootstrap.maxTurns === 'number' ? bootstrap.maxTurns : 0;
@@ -30,6 +32,20 @@
   const PRIORITY_LOADING_MIN_MS = 450;
   const PRIORITY_SYNC_STORAGE_KEY = 'prioritySyncStartAt';
   const PRIORITY_SYNC_MAX_AGE_MS = 10 * 60 * 1000;
+  const FTUE_POLL_INTERVAL_MS = 2000;
+  const FTUE_MESSAGE_GAP_MS = 1100;
+  const FTUE_MESSAGE_JITTER_MS = 700;
+  const FTUE_PRE_TYPING_MS = 900;
+  const FTUE_PRE_TYPING_JITTER_MS = 700;
+  const FTUE_TYPING_BONUS_MS = 450;
+  const FTUE_TYPING_BONUS_JITTER_MS = 650;
+  const FTUE_MESSAGES = [
+    "Hey! I'm your email secretary.",
+    "I'll start reviewing your inbox now.",
+    "When something needs you, I'll move it into the priority queue.",
+    "I'll guide you through each email and suggest a quick next step.",
+    "You can also browse everything still in your inbox at any time."
+  ];
   const PRIORITY_PATTERNS = {
     urgent: /\b(urgent|asap|immediately|time[-\s]?sensitive|deadline|final notice|action required|response required|reply needed|respond by|past due|overdue|expir(?:e|es|ing))\b/i,
     security: /\b(security|verify|verification|password|2fa|unauthorized|suspicious|fraud|breach|locked?|login|sign[-\s]?in|account alert)\b/i,
@@ -49,6 +65,25 @@
     if (!value) return 0;
     const ts = Date.parse(value);
     return Number.isFinite(ts) ? ts : 0;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => window.setTimeout(resolve, ms));
+  }
+
+  function ftueMessagePause() {
+    const jitter = Math.floor(Math.random() * FTUE_MESSAGE_JITTER_MS);
+    return sleep(FTUE_MESSAGE_GAP_MS + jitter);
+  }
+
+  function ftuePreTypingPause() {
+    const jitter = Math.floor(Math.random() * FTUE_PRE_TYPING_JITTER_MS);
+    return FTUE_PRE_TYPING_MS + jitter;
+  }
+
+  function ftueTypingBonus() {
+    const jitter = Math.floor(Math.random() * FTUE_TYPING_BONUS_JITTER_MS);
+    return FTUE_TYPING_BONUS_MS + jitter;
   }
 
   function normalizePriorityProgress(raw) {
@@ -183,7 +218,9 @@
     seenThreads: new Set(),
     mustKnowByThread: new Map(),
     suggestedLinksByThread: new Map(),
-    openLinkProgress: new Map()
+    openLinkProgress: new Map(),
+    ftueStarted: false,
+    ftueCompleted: false
   };
   const assistantQueues = new Map();
   const pendingTranscripts = new Map();
@@ -272,6 +309,10 @@
     } else {
       setEmptyState('No emails queued. Tap Sync Gmail to pull fresh ones.');
       toggleComposer(false);
+    }
+
+    if (FTUE_ENABLED) {
+      void startFtueFlow();
     }
   }
 
@@ -369,6 +410,208 @@
     if (refs.replyCancel) refs.replyCancel.addEventListener('click', () => closeReplyPanel(true));
     if (refs.replyClose) refs.replyClose.addEventListener('click', () => closeReplyPanel(true));
     if (refs.replyBody) refs.replyBody.addEventListener('input', syncReplyValues);
+  }
+
+  async function startFtueFlow() {
+    if (!FTUE_ENABLED || state.ftueStarted || state.ftueCompleted) return;
+    state.ftueStarted = true;
+    ensureFtueThread();
+    toggleComposer(false);
+    markPrioritySyncStart();
+    logDebug('ftue:start');
+
+    for (const message of FTUE_MESSAGES) {
+      await enqueueAssistantMessage(FTUE_THREAD_ID, message, {
+        preDelayMs: ftuePreTypingPause(),
+        typingDelayMs: ftueTypingBonus()
+      });
+      await ftueMessagePause();
+    }
+
+    await announceSyncStatus();
+    await handlePriorityFollowup();
+    state.ftueCompleted = true;
+    logDebug('ftue:done');
+  }
+
+  function ensureFtueThread() {
+    if (state.activeId) return;
+    state.activeId = FTUE_THREAD_ID;
+    if (refs.emailEmpty) refs.emailEmpty.classList.add('hidden');
+    renderChat(FTUE_THREAD_ID);
+  }
+
+  function markPrioritySyncStart() {
+    const now = Date.now();
+    if (!state.prioritySyncStartAt) {
+      state.prioritySyncStartAt = now;
+      writePrioritySyncStart(now);
+    }
+    setPriorityLoading(true);
+  }
+
+  async function fetchIngestStatus() {
+    try {
+      const resp = await fetch('/ingest/status', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to load ingest status.');
+      }
+      return data || {};
+    } catch (err) {
+      logDebug('ftue:ingest status failed', err);
+      return { status: 'unknown' };
+    }
+  }
+
+  async function refreshPrioritySnapshot() {
+    try {
+      const resp = await fetch('/api/priority', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || 'Unable to load priority queue.');
+      }
+      applyPriorityPayload(data);
+      const progress = normalizePriorityProgress(data?.progress);
+      if (progress && typeof progress.totalCount === 'number') {
+        state.totalInboxCount = progress.totalCount;
+      }
+      if (typeof data?.batchFinishedAt === 'string') {
+        state.priorityLastBatchAt = parseTimestamp(data.batchFinishedAt);
+      }
+      return data;
+    } catch (err) {
+      logDebug('ftue:priority snapshot failed', err);
+      return null;
+    }
+  }
+
+  async function refreshThreadsSnapshot() {
+    try {
+      const resp = await fetch('/api/threads?page=1', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !Array.isArray(data?.threads)) {
+        throw new Error(data?.error || 'Unable to load emails.');
+      }
+      const incoming = data.threads.map(normalizeThread).filter(Boolean);
+      appendThreads(incoming);
+      const meta = data.meta || {};
+      state.totalInboxCount = typeof meta.totalItems === 'number' ? meta.totalItems : state.totalInboxCount;
+      state.pageSize = typeof meta.pageSize === 'number' ? meta.pageSize : state.pageSize;
+      state.hasMore = Boolean(meta.hasMore);
+      state.nextPage = state.hasMore
+        ? (typeof meta.nextPage === 'number' ? meta.nextPage : 2)
+        : 0;
+      state.totalLoaded = state.positions.size;
+      updateHeaderCount();
+      updateProgress();
+      updateQueuePill();
+      updateDrawerLists();
+      updateLoadMoreButtons();
+      return data;
+    } catch (err) {
+      logDebug('ftue:threads snapshot failed', err);
+      return null;
+    }
+  }
+
+  async function announceSyncStatus() {
+    const ingest = await fetchIngestStatus();
+    const snapshot = await refreshPrioritySnapshot();
+    const progress = state.priorityProgress || normalizePriorityProgress(snapshot?.progress);
+    const totalCount = progress?.totalCount ?? state.totalInboxCount ?? 0;
+    const prioritizedCount = progress?.prioritizedCount ?? 0;
+    const ingestStatus = typeof ingest?.status === 'string' ? ingest.status : 'unknown';
+    let statusMessage = '';
+
+    if (ingestStatus === 'error') {
+      statusMessage = "Status: I'm having trouble syncing Gmail right now.";
+    } else if (ingestStatus === 'running' || (ingestStatus === 'idle' && totalCount === 0)) {
+      statusMessage = "Status: I'm still importing your inbox list. Prioritization starts right after.";
+    } else if (!totalCount) {
+      statusMessage = 'Status: Inbox loaded.';
+    } else if (!prioritizedCount) {
+      statusMessage = "Status: Inbox loaded. I'm prioritizing now.";
+    } else if (prioritizedCount < totalCount) {
+      statusMessage = "Status: I've prioritized some emails and I'm still scanning the rest.";
+    } else {
+      statusMessage = 'Status: Inbox fully reviewed and prioritized.';
+    }
+
+    if (statusMessage) {
+      await enqueueAssistantMessage(FTUE_THREAD_ID, statusMessage, {
+        preDelayMs: ftuePreTypingPause(),
+        typingDelayMs: ftueTypingBonus()
+      });
+    }
+
+    if (!totalCount && ingestStatus !== 'running') {
+      await enqueueAssistantMessage(FTUE_THREAD_ID, 'Your inbox is empty! Nice :)', {
+        preDelayMs: ftuePreTypingPause(),
+        typingDelayMs: ftueTypingBonus()
+      });
+    }
+  }
+
+  async function handlePriorityFollowup() {
+    const deadline = Date.now() + 2 * 60 * 1000;
+    let sentHoldMessage = false;
+
+    while (Date.now() < deadline) {
+      const ingest = await fetchIngestStatus();
+      await refreshPrioritySnapshot();
+      const latestProgress = state.priorityProgress;
+      const latestTotal = latestProgress?.totalCount ?? state.totalInboxCount ?? 0;
+      const latestPrioritized = latestProgress?.prioritizedCount ?? 0;
+      const ingestStatus = typeof ingest?.status === 'string' ? ingest.status : 'unknown';
+
+      if (!latestTotal && ingestStatus !== 'running') {
+        return;
+      }
+
+      if (state.priority.length) {
+        await enqueueAssistantMessage(FTUE_THREAD_ID, "I found some emails that I think need your attention. Let's go through them...", {
+          preDelayMs: ftuePreTypingPause(),
+          typingDelayMs: ftueTypingBonus()
+        });
+        const firstId = state.priority[0];
+        if (firstId) setActiveThread(firstId);
+        return;
+      }
+
+      if (latestTotal && latestPrioritized >= latestTotal) {
+        await enqueueAssistantMessage(FTUE_THREAD_ID, "I didn't find anything that I think needs your attention. Let's go through the rest of your inbox...", {
+          preDelayMs: ftuePreTypingPause(),
+          typingDelayMs: ftueTypingBonus()
+        });
+        await refreshThreadsSnapshot();
+        const fallback = getNextReviewCandidate() || state.needs[0];
+        if (fallback) setActiveThread(fallback);
+        return;
+      }
+
+      if (latestTotal && !sentHoldMessage) {
+        await enqueueAssistantMessage(FTUE_THREAD_ID, 'Hold on a second while I finish prioritizing...', {
+          preDelayMs: ftuePreTypingPause(),
+          typingDelayMs: ftueTypingBonus()
+        });
+        sentHoldMessage = true;
+      }
+
+      await sleep(FTUE_POLL_INTERVAL_MS);
+    }
   }
 
   function handleThreadListClick(event, variant) {
@@ -2767,12 +3010,17 @@
 
   function enqueueAssistantMessage(threadId, content, options = {}) {
     if (!threadId) return Promise.resolve();
-    const delay = options.instant ? 0 : nextTypingDelay(content);
+    const preDelay = Number.isFinite(options.preDelayMs) ? Math.max(0, options.preDelayMs) : 0;
+    const bonusDelay = Number.isFinite(options.typingDelayMs) ? Math.max(0, options.typingDelayMs) : 0;
+    const delay = options.instant ? 0 : nextTypingDelay(content) + bonusDelay;
     const queue = assistantQueues.get(threadId) || Promise.resolve();
     const next = queue.then(async () => {
       const isActive = threadId === state.activeId;
-      if (delay > 0 && isActive) startAssistantTyping(threadId);
-      if (delay > 0) await new Promise(resolve => window.setTimeout(resolve, delay));
+      if (delay > 0) {
+        if (preDelay > 0) await sleep(preDelay);
+        if (isActive) startAssistantTyping(threadId);
+        await sleep(delay);
+      }
       appendTurn(threadId, { role: 'assistant', content });
       renderChat(threadId);
       if (delay > 0 && isActive) stopAssistantTyping(threadId);

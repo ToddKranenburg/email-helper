@@ -189,6 +189,8 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
 
   (req.session as any).googleTokens = tokens;
   (req.session as any).user = userPayload;
+  (req.session as any).skipAutoIngest = false;
+  (req.session as any).ftueAutoIngest = true;
   res.redirect('/dashboard');
 });
 
