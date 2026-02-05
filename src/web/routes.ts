@@ -250,8 +250,10 @@ router.get('/dashboard', async (req: Request, res: Response) => {
 });
 
 router.post('/ingest', async (req: Request, res: Response) => {
+  const wantsJson = req.accepts(['json', 'html']) === 'json' || req.get('accept')?.includes('application/json');
   const sessionData = req.session as any;
   if (!sessionData.googleTokens || !sessionData.user?.id) {
+    if (!wantsJson) return res.redirect('/auth/google');
     return res.status(401).send('auth first');
   }
   if (ensureScopesForApi(sessionData, res)) return;
@@ -262,16 +264,19 @@ router.post('/ingest', async (req: Request, res: Response) => {
 
   const existing = ingestStatus.get(userId);
   if (existing?.status === 'running') {
+    if (!wantsJson) return res.redirect('/dashboard');
     return res.json({ status: 'running' });
   }
 
   const sessionSnapshot = cloneSessionForIngest(sessionData);
   if (!sessionSnapshot) {
+    if (!wantsJson) return res.redirect('/dashboard');
     return res.status(400).json({ status: 'error', message: 'Missing session data for ingest.' });
   }
 
   markIngestStatus(userId, 'running');
   triggerBackgroundIngest(sessionSnapshot, userId);
+  if (!wantsJson) return res.redirect('/dashboard');
   res.json({ status: 'running' });
 });
 

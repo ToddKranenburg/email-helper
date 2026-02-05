@@ -4,11 +4,30 @@ import { prisma } from '../store/db.js';
 
 export const authRouter = Router();
 
+function resolveGoogleRedirectUri(): string {
+  const configured = process.env.GOOGLE_REDIRECT_URI;
+  const port = Number(process.env.PORT) || 3000;
+  if (!configured) {
+    return `http://localhost:${port}/auth/google/callback`;
+  }
+  try {
+    const url = new URL(configured);
+    const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    if (isLocalhost) {
+      url.port = String(port);
+      return url.toString();
+    }
+  } catch {
+    // Fall through to return configured value.
+  }
+  return configured;
+}
+
 function createOAuthClient() {
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID!,
     process.env.GOOGLE_CLIENT_SECRET!,
-    process.env.GOOGLE_REDIRECT_URI!
+    resolveGoogleRedirectUri()
   );
 }
 
