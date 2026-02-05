@@ -36,6 +36,14 @@ const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'er
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
 const REPLY_DRAFT_MIN_CONFIDENCE = 0.75;
+const isAuthenticated = (sessionData: any) => Boolean(sessionData?.googleTokens?.access_token && sessionData?.user?.id);
+
+router.use((req, res, next) => {
+  if (req.path === '/') return next();
+  const sessionData = req.session as any;
+  if (isAuthenticated(sessionData)) return next();
+  return res.redirect('/');
+});
 
 router.use(async (req, _res, next) => {
   const sessionData = req.session as any;
@@ -139,8 +147,11 @@ router.get('/', async (req: Request, res: Response) => {
     if (ensureScopesForPage(sessionData, res)) return;
     return res.redirect('/dashboard');
   }
-  // ❌ Not authorized yet: show connect link
-  res.send(`<a href="/auth/google">Connect Gmail</a>`);
+  // ❌ Not authorized yet: show landing page
+  const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
+  const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/landing.html'), 'utf8');
+  const html = layout.replace('<!--CONTENT-->', body);
+  res.send(html);
 });
 
 type PageMeta = {
