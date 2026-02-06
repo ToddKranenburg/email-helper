@@ -185,6 +185,7 @@
     hydrating: new Set(),
     pendingSuggestedActions: new Map(),
     seenThreads: new Set(),
+    loadTypingThreads: new Set(),
     mustKnowByThread: new Map(),
     suggestedLinksByThread: new Map(),
     openLinkProgress: new Map()
@@ -599,6 +600,7 @@
   async function fetchAutoSummary(threadId) {
     if (!threadId || state.hydrating.has(threadId)) return;
     state.hydrating.add(threadId);
+    startThreadLoadTyping(threadId);
     logDebug('fetchAutoSummary:start', threadId);
     try {
       const resp = await fetch('/secretary/auto-summarize', {
@@ -624,6 +626,7 @@
       state.hydrated.delete(threadId);
     } finally {
       state.hydrating.delete(threadId);
+      stopThreadLoadTyping(threadId);
     }
   }
 
@@ -817,6 +820,7 @@
     refs.emailEmpty.classList.add('hidden');
     updateEmailCard(thread);
     insertThreadDivider(threadId);
+    startThreadLoadTyping(threadId);
     hydrateThreadTimeline(threadId);
     revealPendingTranscripts(threadId);
     ensureHistory(threadId);
@@ -833,6 +837,14 @@
       enqueueAssistantMessage(threadId, prompt);
     }
     state.seenThreads.add(threadId);
+
+    const pendingCount = pendingTranscripts.get(threadId)?.length || 0;
+    const serverItems = state.serverTimelines.get(threadId) || [];
+    const needsFetch = !state.hydrated.has(threadId) && !serverItems.length;
+    const isHydrating = state.hydrating.has(threadId);
+    if (!pendingCount && !needsFetch && !isHydrating) {
+      stopThreadLoadTyping(threadId);
+    }
   }
 
   function buildRevisitPrompt(thread) {
@@ -2469,12 +2481,13 @@
       const linkHtml = link
         ? `<a class="chat-divider-link" href="${link}" target="_blank" rel="noopener noreferrer">Open in Gmail ↗</a>`
         : '';
-      const summaryHtml = mustKnow
-        ? `<div class="chat-divider-summary"><span class="chat-divider-summary-icon" aria-hidden="true">✨</span><div>${renderAssistantMarkdown(mustKnow)}</div></div>`
-        : '';
+      const summaryHtml = mustKnow ? renderAssistantMarkdown(mustKnow) : '';
+      const isPriority = state.priority.includes(entry.threadId);
+      const dividerClass = isPriority ? 'chat-divider-card is-priority' : 'chat-divider-card is-inbox';
+      const summaryClass = isPriority ? 'chat-divider-summary is-priority' : 'chat-divider-summary is-inbox';
       return `
           <div class="chat-divider">
-            <div class="chat-divider-card">
+            <div class="${dividerClass}">
               <div class="chat-divider-body">
                 <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
                 <div class="chat-divider-content">
@@ -2483,7 +2496,7 @@
                   ${linkHtml}
                 </div>
               </div>
-              ${summaryHtml}
+              ${mustKnow ? `<div class="${summaryClass}"><span class="chat-divider-summary-icon" aria-hidden="true">✨</span><div>${summaryHtml}</div></div>` : ''}
             </div>
           </div>
         `;
@@ -2766,6 +2779,20 @@
     renderChat(state.activeId);
   }
 
+  function startThreadLoadTyping(threadId = state.activeId) {
+    if (!threadId || threadId !== state.activeId) return;
+    if (state.loadTypingThreads.has(threadId)) return;
+    state.loadTypingThreads.add(threadId);
+    startAssistantTyping(threadId);
+  }
+
+  function stopThreadLoadTyping(threadId = state.activeId) {
+    if (!threadId || threadId !== state.activeId) return;
+    if (!state.loadTypingThreads.has(threadId)) return;
+    state.loadTypingThreads.delete(threadId);
+    stopAssistantTyping(threadId);
+  }
+
   function startAssistantTyping(threadId = state.activeId) {
     if (threadId !== state.activeId) return;
     typingSessions += 1;
@@ -2865,21 +2892,22 @@
     }
   }
 
-  function enqueueTranscriptEntry(threadId, entry) {
+  function enqueueTranscriptEntry(threadId, entry, options = {}) {
     if (!threadId) return Promise.resolve();
+    const manageTyping = options.manageTyping !== false;
     const delay = nextTypingDelay(entry.content || '');
     const queue = assistantQueues.get(threadId) || Promise.resolve();
     const next = queue.then(async () => {
       const isActive = threadId === state.activeId;
-      if (delay > 0 && isActive) startAssistantTyping(threadId);
+      if (delay > 0 && isActive && manageTyping) startAssistantTyping(threadId);
       if (delay > 0) await new Promise(resolve => window.setTimeout(resolve, delay));
       applyTranscriptEntryEffects(threadId, entry);
       state.timeline.push(entry);
       renderChat(threadId);
-      if (delay > 0 && isActive) stopAssistantTyping(threadId);
+      if (delay > 0 && isActive && manageTyping) stopAssistantTyping(threadId);
     }).catch((err) => {
       console.error('Failed to enqueue transcript entry', err);
-      stopAssistantTyping(threadId);
+      if (manageTyping) stopAssistantTyping(threadId);
     });
     assistantQueues.set(threadId, next);
     return next;
@@ -2895,7 +2923,15 @@
     const pending = pendingTranscripts.get(threadId);
     if (!pending || !pending.length) return;
     pendingTranscripts.delete(threadId);
-    pending.reduce((chain, entry) => chain.then(() => enqueueTranscriptEntry(threadId, entry)), Promise.resolve());
+    const isActive = threadId === state.activeId;
+    if (isActive) startThreadLoadTyping(threadId);
+    const chain = pending.reduce(
+      (promise, entry) => promise.then(() => enqueueTranscriptEntry(threadId, entry, { manageTyping: false })),
+      Promise.resolve()
+    );
+    if (isActive) {
+      chain.finally(() => stopThreadLoadTyping(threadId));
+    }
   }
 
   function withButtonBusy(btn, label) {
@@ -3748,7 +3784,37 @@
     }
     const prepared = linkifyMarkdownSource(text);
     const html = markedLib.parse(prepared);
-    return sanitizeHtml(html);
+    const normalized = replaceListsWithBullets(html);
+    return sanitizeHtml(normalized);
+  }
+
+  function replaceListsWithBullets(html) {
+    if (typeof document === 'undefined') return html;
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const lists = container.querySelectorAll('ul, ol');
+    lists.forEach((list) => {
+      const prev = list.previousElementSibling;
+      if (prev && prev.tagName === 'P') {
+        prev.classList.add('tight-next');
+      }
+      const items = Array.from(list.children).filter((node) => node.tagName === 'LI');
+      if (!items.length) {
+        list.remove();
+        return;
+      }
+      const block = document.createElement('div');
+      block.className = 'bullet-block';
+      items.forEach((item) => {
+        const line = document.createElement('span');
+        line.className = 'bullet-line';
+        const content = item.innerHTML.trim();
+        line.innerHTML = `• ${content}`;
+        block.appendChild(line);
+      });
+      list.replaceWith(block);
+    });
+    return container.innerHTML;
   }
 
   function linkifyMarkdownSource(text) {
