@@ -11,8 +11,9 @@
         </div>
         <div class="triage-controls hero-actions">
           <form id="ingest-form" action="/ingest" method="post">
-            <button class="sync-btn" type="submit">Sync Gmail</button>
+            <button class="sync-btn" type="submit">Sync</button>
           </form>
+          <div class="sync-meta" id="sync-meta" aria-live="polite"></div>
         </div>
       </header>
       <p id="ingest-error" class="ingest-error hidden" role="alert"></p>

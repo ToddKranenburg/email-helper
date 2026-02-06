@@ -104,7 +104,25 @@
       display: flex;
       gap: 8px;
       align-items: center;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+    }
+    @media (max-width: 720px) {
+      .triage-controls {
+        flex-wrap: wrap;
+      }
+    }
+    .sync-meta {
+      display: inline-flex;
+      align-items: center;
+      white-space: nowrap;
+      font-size: 12px;
+      color: rgba(24, 28, 38, 0.78);
+      letter-spacing: 0.01em;
+      min-height: 16px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.7);
+      border: none;
     }
     button, input, textarea {
       font-family: inherit;
@@ -112,8 +130,9 @@
     .sync-btn {
       border-radius: 10px;
       border: 1px solid transparent;
-      padding: 10px 16px;
+      padding: 7px 12px;
       font-weight: 600;
+      font-size: 12px;
       cursor: pointer;
       transition: transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
       box-shadow: none;
@@ -1866,7 +1885,33 @@
     const overlay = document.getElementById('loading');
     const errorBox = document.getElementById('ingest-error');
     const loadingText = overlay ? overlay.querySelector('.loading-text') : null;
+    const syncMetaEl = document.getElementById('sync-meta');
+    const initialSyncMeta = window.SYNC_META || null;
     let ingestInFlight = false;
+
+    function updateSyncMeta(meta) {
+      if (!syncMetaEl) return;
+      if (!meta?.lastSyncAt) {
+        syncMetaEl.textContent = 'Last sync: not yet';
+        return;
+      }
+      const formatted = formatSyncTimestamp(meta.lastSyncAt);
+      if (!formatted) {
+        syncMetaEl.textContent = 'Last sync: unavailable';
+        return;
+      }
+      syncMetaEl.textContent = `Last sync: ${formatted}`;
+    }
+
+    function formatSyncTimestamp(iso) {
+      const parsed = new Date(iso);
+      if (Number.isNaN(parsed.getTime())) return '';
+      const opts = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+      if (parsed.getFullYear() !== new Date().getFullYear()) {
+        opts.year = 'numeric';
+      }
+      return parsed.toLocaleString(undefined, opts);
+    }
 
     async function triggerIngest(options = {}) {
       if (!form || ingestInFlight) return;
@@ -1890,6 +1935,9 @@
           throw new Error(message || 'Unable to sync your Gmail inbox right now. Please try again.');
         }
         if (data?.status === 'done') {
+          if (!reloadOnDone) {
+            updateSyncMeta({ lastSyncAt: new Date().toISOString(), source: 'manual' });
+          }
           if (reloadOnDone) window.location.reload();
           return;
         }
@@ -1927,6 +1975,9 @@
         }
         if (data?.status === 'done') {
           if (showOverlay) setLoadingText('Finishing up…');
+          if (!reloadOnDone) {
+            updateSyncMeta({ lastSyncAt: new Date().toISOString(), source: 'manual' });
+          }
           if (reloadOnDone) window.location.reload();
           return;
         }
@@ -1957,6 +2008,8 @@
         triggerIngest();
       });
     }
+
+    updateSyncMeta(initialSyncMeta);
 
     // Auto-ingest after first render if server says we're empty (first-time auth)
     if (window.AUTO_INGEST && form) {

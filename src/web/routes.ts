@@ -34,6 +34,7 @@ import {
 export const router = Router();
 const PAGE_SIZE = 20;
 const PRIORITY_PAGE_SIZE = 10;
+const AUTO_SYNC_WINDOW_MS = 5 * 60 * 1000;
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
 const REPLY_DRAFT_MIN_CONFIDENCE = 0.75;
@@ -166,6 +167,7 @@ type PageMeta = {
 type SummaryWithThreadIndex = Summary & { threadIndex: ThreadIndex | null };
 type ThreadListItem = { thread: ThreadIndex; summary: Summary | null };
 type ThreadContext = { summary: SummaryWithThreadIndex; transcript: string; participants: string[] };
+type SyncMeta = { lastSyncAt: string | null; source: 'manual' | 'auto' | null };
 type SecretaryThread = {
   threadId: string;
   messageId: string;
@@ -217,19 +219,22 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   log('templates read', { durationMs: elapsedMs(templateStart) });
   const threads = await buildThreadsPayload(userId, pageData.items);
   const priorityQueue = await loadPriorityQueue(userId, { limit: PRIORITY_PAGE_SIZE, offset: 0 });
-  const [prioritizedCount, totalCount, totalPriorityCount, latestCompletedBatch] = await Promise.all([
+  const [prioritizedCount, totalCount, totalPriorityCount, latestCompletedBatch, gmailAccount, userRecord] = await Promise.all([
     prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true, priorityScore: { not: null } } }),
     prisma.threadIndex.count({ where: { userId, inPrimaryInbox: true } }),
     prisma.threadIndex.count({ where: priorityQueueWhere(userId) }),
     prisma.prioritizationBatch.findFirst({
       where: { userId, status: 'completed', finishedAt: { not: null } },
       orderBy: { finishedAt: 'desc' }
-    })
+    }),
+    prisma.gmailAccount.findUnique({ where: { userId }, select: { lastSyncAt: true } }),
+    prisma.user.findUnique({ where: { id: userId }, select: { lastBatchSyncAt: true } })
   ]);
   const priorityThreads = priorityQueue.items.length
     ? await buildThreadsPayload(userId, priorityQueue.items)
     : [];
   const mergedThreads = mergeThreads(threads, priorityThreads);
+  const syncMeta = buildSyncMeta(gmailAccount?.lastSyncAt ?? null, userRecord?.lastBatchSyncAt ?? null);
 
   // Inject a small flag the client script can read to auto-trigger ingest
   const renderStart = performance.now();
@@ -254,7 +259,8 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     pageMeta,
     priorityQueue.priority,
     { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null },
-    priorityMeta
+    priorityMeta,
+    syncMeta
   )}
   <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
@@ -1292,10 +1298,24 @@ function render(
   meta: PageMeta,
   priority: PriorityEntry[],
   priorityProgress: { prioritizedCount: number; totalCount: number; batchFinishedAt: Date | null },
-  priorityMeta: { totalCount: number; pageSize: number; offset: number; hasMore: boolean; nextOffset: number }
+  priorityMeta: { totalCount: number; pageSize: number; offset: number; hasMore: boolean; nextOffset: number },
+  syncMeta: SyncMeta
 ) {
   const secretaryScript = renderSecretaryAssistant(items, meta, priority, priorityProgress, priorityMeta);
-  return `${tpl}\n${secretaryScript}`;
+  const syncPayload = safeJson(syncMeta);
+  return `${tpl}\n${secretaryScript}\n<script id="sync-meta-bootstrap">window.SYNC_META = ${syncPayload};</script>`;
+}
+
+function buildSyncMeta(lastSyncAt: Date | null, lastBatchSyncAt: Date | null): SyncMeta {
+  if (!lastSyncAt) return { lastSyncAt: null, source: null };
+  let source: SyncMeta['source'] = 'manual';
+  if (lastBatchSyncAt) {
+    const diffMs = Math.abs(lastBatchSyncAt.getTime() - lastSyncAt.getTime());
+    if (diffMs <= AUTO_SYNC_WINDOW_MS) {
+      source = 'auto';
+    }
+  }
+  return { lastSyncAt: lastSyncAt.toISOString(), source };
 }
 
 function renderSecretaryAssistant(
