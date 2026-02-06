@@ -521,14 +521,18 @@
       color: var(--muted);
       font-size: 12px;
       padding: 0;
-      position: sticky;
-      top: 0;
-      z-index: 3;
+      position: relative;
+      z-index: 1;
       background-color: var(--chat-bg);
       background-image: var(--chat-wallpaper);
       background-size: cover;
       align-self: stretch;
       width: 100%;
+    }
+    .chat-divider.is-pinned {
+      position: sticky;
+      top: 0;
+      z-index: 3;
     }
     .chat-divider-line {
       display: none;

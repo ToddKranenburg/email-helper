@@ -30,6 +30,7 @@
   const PRIORITY_LOADING_MIN_MS = 450;
   const PRIORITY_SYNC_STORAGE_KEY = 'prioritySyncStartAt';
   const PRIORITY_SYNC_MAX_AGE_MS = 10 * 60 * 1000;
+  const AUTO_THREAD_PAUSE_MS = 1500;
   const PRIORITY_PATTERNS = {
     urgent: /\b(urgent|asap|immediately|time[-\s]?sensitive|deadline|final notice|action required|response required|reply needed|respond by|past due|overdue|expir(?:e|es|ing))\b/i,
     security: /\b(security|verify|verification|password|2fa|unauthorized|suspicious|fraud|breach|locked?|login|sign[-\s]?in|account alert)\b/i,
@@ -179,6 +180,7 @@
     nextPage: NEXT_PAGE,
     loadingMore: false,
     autoAdvanceTimer: 0,
+    snapThreadId: '',
     pendingCreateThreadId: '',
     pendingArchiveThreadId: '',
     hydrated: new Set(),
@@ -273,7 +275,7 @@
 
     if (state.needs.length) {
       const startId = getNextReviewCandidate() || state.needs[0];
-      setActiveThread(startId);
+      setActiveThread(startId, { source: 'init' });
     } else {
       setEmptyState('No emails queued. Tap Sync Gmail to pull fresh ones.');
       toggleComposer(false);
@@ -391,7 +393,7 @@
     const threadId = target.dataset.threadId;
     if (!threadId || !state.lookup.has(threadId)) return;
     if (variant === 'drawer') toggleDrawer(false);
-    setActiveThread(threadId);
+    setActiveThread(threadId, { source: 'user' });
   }
 
   function handleTimelineClick(event) {
@@ -582,7 +584,7 @@
     if (!normalized) return;
     clearPendingSuggestedAction(threadId);
     if (normalized === 'reply') {
-      if (threadId && threadId !== state.activeId) setActiveThread(threadId);
+      if (threadId && threadId !== state.activeId) setActiveThread(threadId, { source: 'user' });
       openReplyPanel();
       return;
     }
@@ -776,7 +778,7 @@
       }
       if (!state.activeId && state.needs.length && reason !== 'auto') {
         const nextId = getNextReviewCandidate() || state.needs[0];
-        setActiveThread(nextId);
+        setActiveThread(nextId, { source: 'user' });
       }
       return added;
     } catch (err) {
@@ -791,14 +793,17 @@
     }
   }
 
-  function setActiveThread(threadId) {
+  function setActiveThread(threadId, options = {}) {
     if (!threadId || !state.lookup.has(threadId)) return;
     if (state.activeId === threadId) return;
     const wasSeen = state.seenThreads.has(threadId);
+    const source = typeof options.source === 'string' ? options.source : 'auto';
     clearAutoAdvance();
+    state.snapThreadId = threadId;
     state.activeId = threadId;
     const thread = state.lookup.get(threadId);
     logDebug('setActiveThread', threadId, {
+      source,
       hasTimeline: state.timeline.some(item => item.threadId === threadId),
       serverTimelineCount: (state.serverTimelines.get(threadId) || []).length,
       hydrated: state.hydrated.has(threadId)
@@ -825,7 +830,7 @@
     revealPendingTranscripts(threadId);
     ensureHistory(threadId);
     setChatError('');
-    renderChat(threadId);
+    renderChat(threadId, { scrollMode: 'divider' });
     updateHint(threadId);
     updateDrawerLists();
     updateQueuePill();
@@ -2441,9 +2446,29 @@
     });
   }
 
-  function renderChat(threadId = state.activeId) {
+  function getPinnedDividerIndex(threadId, timeline) {
+    if (!threadId || !timeline?.length) return -1;
+    for (let i = timeline.length - 1; i >= 0; i--) {
+      const entry = timeline[i];
+      if (entry.type === 'divider' && entry.threadId === threadId) return i;
+    }
+    return -1;
+  }
+
+  function snapToPinnedDivider(threadId) {
+    if (!refs.chatScroll || !refs.chatLog) return;
+    window.requestAnimationFrame(() => {
+      const pinned = refs.chatLog.querySelector('.chat-divider.is-pinned');
+      if (!(pinned instanceof HTMLElement)) return;
+      const top = pinned.offsetTop;
+      refs.chatScroll.scrollTo({ top, behavior: 'smooth' });
+    });
+  }
+
+  function renderChat(threadId = state.activeId, options = {}) {
     if (!refs.chatLog) return;
     const timeline = state.timeline.slice();
+    const pinnedDividerIndex = getPinnedDividerIndex(threadId, timeline);
     logDebug('renderChat', {
       threadId,
       timelineCount: timeline.length,
@@ -2455,7 +2480,9 @@
         contentPreview: (t.content || '').slice(0, 80)
       }))
     });
-    let markup = timeline.map(renderTimelineEntry).join('');
+    let markup = timeline.map((entry, index) => renderTimelineEntry(entry, {
+      isPinned: index === pinnedDividerIndex
+    })).join('');
     logDebug('renderChat markup preview', markup.slice(0, 200));
     if (!markup && !state.typing) {
       markup = chatPlaceholder();
@@ -2464,12 +2491,20 @@
       markup += typingIndicatorHtml();
     }
     refs.chatLog.innerHTML = markup;
-    if (refs.chatScroll) refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+    const scrollMode = options.scrollMode || (state.snapThreadId === threadId ? 'divider' : 'bottom');
+    if (refs.chatScroll) {
+      if (scrollMode === 'divider') {
+        snapToPinnedDivider(threadId);
+      } else if (scrollMode === 'bottom') {
+        refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+      }
+    }
     updateComposerPlaceholder(threadId);
   }
 
-  function renderTimelineEntry(entry) {
+  function renderTimelineEntry(entry, options = {}) {
     if (entry.type === 'divider') {
+      const isPinned = Boolean(options.isPinned);
       const label = htmlEscape(entry.label || 'New email thread');
       const sender = htmlEscape(entry.sender || '');
       const subject = htmlEscape(entry.subject || '');
@@ -2485,8 +2520,9 @@
       const isPriority = state.priority.includes(entry.threadId);
       const dividerClass = isPriority ? 'chat-divider-card is-priority' : 'chat-divider-card is-inbox';
       const summaryClass = isPriority ? 'chat-divider-summary is-priority' : 'chat-divider-summary is-inbox';
+      const dividerClassName = isPinned ? 'chat-divider is-pinned' : 'chat-divider';
       return `
-          <div class="chat-divider">
+          <div class="${dividerClassName}" data-thread-id="${escapeAttribute(entry.threadId)}">
             <div class="${dividerClass}">
               <div class="chat-divider-body">
                 <div class="chat-divider-avatar" aria-hidden="true">${initials}</div>
@@ -2791,6 +2827,9 @@
     if (!state.loadTypingThreads.has(threadId)) return;
     state.loadTypingThreads.delete(threadId);
     stopAssistantTyping(threadId);
+    if (state.snapThreadId === threadId) {
+      state.snapThreadId = '';
+    }
   }
 
   function startAssistantTyping(threadId = state.activeId) {
@@ -3121,7 +3160,7 @@
       allowWrap: !state.hasMore
     });
     if (nextId) {
-      setActiveThread(nextId);
+      scheduleAutoAdvance(nextId);
       return;
     }
     if (state.hasMore) {
@@ -3140,7 +3179,7 @@
     if (added.length) {
       const nextId = getNextReviewCandidate();
       if (nextId) {
-        setActiveThread(nextId);
+        scheduleAutoAdvance(nextId);
         return;
       }
     }
@@ -3165,7 +3204,7 @@
     const nextIndex = order.length > 1 ? (index + 1) % order.length : -1;
     const nextId = nextIndex >= 0 ? order[nextIndex] : '';
     if (nextId && nextId !== threadId) {
-      setActiveThread(nextId);
+      scheduleAutoAdvance(nextId);
     }
   }
 
@@ -3191,7 +3230,7 @@
       allowWrap: !state.hasMore
     });
     if (nextId) {
-      setActiveThread(nextId);
+      scheduleAutoAdvance(nextId);
       return;
     }
     if (state.hasMore) {
@@ -3206,7 +3245,7 @@
     const nextIndex = index === -1 ? 0 : (index + 1) % order.length;
     const fallbackId = order[nextIndex] || order[0];
     if (fallbackId) {
-      setActiveThread(fallbackId);
+      scheduleAutoAdvance(fallbackId);
     }
   }
 
@@ -3281,6 +3320,16 @@
       window.clearTimeout(state.autoAdvanceTimer);
       state.autoAdvanceTimer = 0;
     }
+  }
+
+  function scheduleAutoAdvance(threadId, options = {}) {
+    if (!threadId) return;
+    const delayMs = Number.isFinite(options.delayMs) ? options.delayMs : AUTO_THREAD_PAUSE_MS;
+    clearAutoAdvance();
+    state.autoAdvanceTimer = window.setTimeout(() => {
+      state.autoAdvanceTimer = 0;
+      setActiveThread(threadId, { source: 'auto' });
+    }, Math.max(0, delayMs));
   }
 
   async function handleArchiveIntent(userText, options = {}) {
