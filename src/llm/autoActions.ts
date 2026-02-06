@@ -40,6 +40,8 @@ Rules:
 - "suggested_actions[].external_action.steps": two sentences max. First sentence says why it matters. Second sentence says what to do.
 - "suggested_actions[].external_action.links": 1-3 items for OPEN_LINK. Omit or leave empty for EXTERNAL_ACTION.
 - If action_type is NONE, still include it in suggested_actions with a brief userFacingPrompt.
+- Scan the ENTIRE thread (including older messages) for unresolved asks, commitments, or promised follow-ups. If any remain open, include actions to address them.
+- If the thread is from close family or includes emotionally weighty topics (illness, grief, remembering a parent), prioritize REPLY unless the user has already replied in the most recent message and there is truly no action left.
 - The user's identity is provided; treat messages from the user's email as sent by the user, and treat mentions of their name/email as referring to the user.`;
 
 const TASK_DRAFT_PROMPT = `You draft Google Tasks from an email thread.

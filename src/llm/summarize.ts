@@ -46,7 +46,10 @@ CONSTRAINTS:
   -> FYI: personal info updates that are not events
 - "tldr": 1–2 lines, concise, no emojis.
 - "next_step": a short imperative ("RSVP by Friday", "Reply with availability", "No action").
-  Use "No action" when nothing is required.
+  Use "No action" only when nothing is required. Scan the ENTIRE thread (including older messages) for unresolved asks,
+  commitments, decisions, or promised follow-ups. If any are still open, surface them here.
+  If the thread is from close family or contains emotionally weighty topics (e.g., illness, loss, remembering a parent),
+  prefer a reply-oriented next step even if there is no explicit ask.
 - "confidence": High | Medium | Low (your confidence in category and next_step).
 - The user's identity is provided; treat messages from the user's email as sent by the user, and treat mentions of their name/email as referring to the user.`;
 

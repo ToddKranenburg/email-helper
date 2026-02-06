@@ -17,12 +17,12 @@
   const NEXT_PAGE = typeof bootstrap.nextPage === 'number' ? bootstrap.nextPage : (HAS_MORE ? 2 : 0);
   const DEFAULT_NUDGE = 'Type your next move here.';
   const REVIEW_PROMPT = 'Give me a more detailed but easy-to-digest summary of this email. Highlight the main points, asks, deadlines, and any decisions in quick bullets.';
-  const REVISIT_PROMPTS = [
-    'Back on this thread. Want a recap or a next step?',
-    'We’ve seen this one before. Want the latest context?',
-    'Circling back here. Want me to summarize or suggest a reply?',
-    'Picking this back up. Need a quick refresher?',
-    'Returning to this thread. What’s the next move?'
+  const REVISIT_TEMPLATES = [
+    desc => `This is ${desc}. Want a recap or a next step?`,
+    desc => `Quick context: ${desc}. Want me to summarize or suggest a reply?`,
+    desc => `Email overview: ${desc}. What should we do next?`,
+    desc => `Here’s the email: ${desc}. Want a refresher or a next move?`,
+    desc => `Context check: ${desc}. Want me to draft a reply or log a task?`
   ];
   const PRIORITY_LIMIT = 6;
   const PRIORITY_MIN_SCORE = 4;
@@ -829,10 +829,24 @@
     refs.chatInput.value = '';
     nudgeComposer(DEFAULT_NUDGE, { focus: true });
     if (wasSeen) {
-      const prompt = REVISIT_PROMPTS[Math.floor(Math.random() * REVISIT_PROMPTS.length)];
+      const prompt = buildRevisitPrompt(thread);
       enqueueAssistantMessage(threadId, prompt);
     }
     state.seenThreads.add(threadId);
+  }
+
+  function buildRevisitPrompt(thread) {
+    if (!thread) return 'Want a recap or next step?';
+    const headline = typeof thread.headline === 'string' ? thread.headline.trim() : '';
+    const summary = typeof thread.summary === 'string' ? thread.summary.trim() : '';
+    const subject = typeof thread.subject === 'string' ? thread.subject.trim() : '';
+    const sender = typeof thread.from === 'string' ? thread.from.trim() : '';
+    let descriptor = headline || summary || subject || 'this email';
+    descriptor = descriptor.replace(/\s+/g, ' ').trim();
+    if (sender) descriptor = `${descriptor} from ${sender}`;
+    if (!descriptor || descriptor === 'this email') return 'Want a recap or next step?';
+    const template = REVISIT_TEMPLATES[Math.floor(Math.random() * REVISIT_TEMPLATES.length)];
+    return template(descriptor);
   }
 
   function updateEmailCard(thread) {

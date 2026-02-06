@@ -36,6 +36,8 @@ Rules:
 - If there is a time-bound meeting request, prefer schedule.
 - If it requires future follow-up with no immediate response, prefer task.
 - If no action is needed, prefer wait or archive.
+- Scan the ENTIRE thread (including older messages) for unresolved asks, commitments, or promised follow-ups. Reflect that in priority_reason and extracted.asks.
+- If the thread is from close family or includes emotionally weighty topics (illness, grief, remembering a parent), raise priority and prefer reply.
 Return ONLY JSON.`;
 
 const PRIORITY_PATTERNS = {
