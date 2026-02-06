@@ -277,7 +277,7 @@ router.post('/ingest', async (req: Request, res: Response) => {
   await ensureUserRecord(sessionData);
   sessionData.skipAutoIngest = true;
 
-  const existing = ingestStatus.get(userId);
+  const existing = getIngestStatus(userId);
   if (existing?.status === 'running') {
     if (!wantsJson) return res.redirect('/dashboard');
     return res.json({ status: 'running' });
