@@ -16,6 +16,7 @@ model User {
   lastBatchSyncAt     DateTime?
   lastBatchSyncStatus String?
   lastBatchSyncError  String?
+  onboardingCompletedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

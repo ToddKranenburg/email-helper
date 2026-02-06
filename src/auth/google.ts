@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 import { prisma } from '../store/db.js';
+import { triggerBackgroundIngest } from '../gmail/ingestTrigger.js';
 
 export const authRouter = Router();
 
@@ -189,9 +190,14 @@ authRouter.get('/google/callback', async (req: Request, res: Response) => {
 
   (req.session as any).googleTokens = tokens;
   (req.session as any).user = userPayload;
-  (req.session as any).skipAutoIngest = false;
-  (req.session as any).ftueAutoIngest = true;
-  res.redirect('/dashboard');
+  const needsOnboarding = !existingUser?.onboardingCompletedAt;
+  (req.session as any).skipAutoIngest = needsOnboarding;
+
+  if (needsOnboarding) {
+    triggerBackgroundIngest({ googleTokens: tokens, user: userPayload }, userId);
+    return res.redirect('/onboarding');
+  }
+  return res.redirect('/dashboard');
 });
 
 export function getAuthedClient(sessionObj: any) {

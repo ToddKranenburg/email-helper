@@ -1895,10 +1895,9 @@
 
     // Auto-ingest after first render if server says we're empty (first-time auth)
     if (window.AUTO_INGEST && form) {
-      const isFtue = Boolean(window.FTUE_ONBOARDING);
       // Give the DOM a tick to paint the existing UI, then trigger ingest.
       requestAnimationFrame(() => {
-        triggerIngest({ showOverlay: !isFtue, reloadOnDone: !isFtue });
+        triggerIngest();
       });
     }
 

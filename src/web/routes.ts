@@ -17,6 +17,8 @@ import type { Summary, ThreadIndex, ActionFlow } from '@prisma/client';
 import { classifyIntent, detectArchiveIntent } from '../llm/intentClassifier.js';
 import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
 import { generateGuidedReplyDraft, generateReplyDraft } from '../llm/replyDraft.js';
+import { getIngestStatus } from '../gmail/ingestStatus.js';
+import { triggerBackgroundIngest } from '../gmail/ingestTrigger.js';
 import {
   ensureAutoSummaryCards,
   fetchTimeline,
@@ -32,7 +34,6 @@ import {
 export const router = Router();
 const PAGE_SIZE = 20;
 const PRIORITY_PAGE_SIZE = 10;
-const ingestStatus = new Map<string, { status: 'idle' | 'running' | 'done' | 'error'; updatedAt: number; error?: string }>();
 const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. Hit the key points, any asks or decisions, deadlines, and suggested follow-ups in short bullets. Keep it scannable.';
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
 const REPLY_DRAFT_MIN_CONFIDENCE = 0.75;
@@ -194,6 +195,9 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   const routeStart = performance.now();
   log('start', { userId });
   await ensureUserRecord(sessionData);
+  if (!(await isOnboardingComplete(userId))) {
+    return res.redirect('/onboarding');
+  }
 
   const requestedPage = typeof req.query.page === 'string' ? parseInt(req.query.page, 10) : 1;
   const listStart = performance.now();
@@ -205,11 +209,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
   if (hasSummaries) {
     sessionData.skipAutoIngest = true;
   }
-  const forceFtue = Boolean(sessionData.ftueAutoIngest);
-  const autoIngest = forceFtue || (!hasSummaries && !sessionData.skipAutoIngest);
-  if (forceFtue) {
-    sessionData.ftueAutoIngest = false;
-  }
+  const autoIngest = !hasSummaries && !sessionData.skipAutoIngest;
 
   const templateStart = performance.now();
   const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
@@ -256,10 +256,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     { prioritizedCount, totalCount, batchFinishedAt: latestCompletedBatch?.finishedAt ?? null },
     priorityMeta
   )}
-  <script>
-    window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};
-    window.FTUE_ONBOARDING = ${autoIngest ? 'true' : 'false'};
-  </script>`;
+  <script>window.AUTO_INGEST = ${autoIngest ? 'true' : 'false'};</script>`;
 
   const html = layout.replace('<!--CONTENT-->', withFlag);
   log('html rendered', { durationMs: elapsedMs(renderStart) });
@@ -292,10 +289,38 @@ router.post('/ingest', async (req: Request, res: Response) => {
     return res.status(400).json({ status: 'error', message: 'Missing session data for ingest.' });
   }
 
-  markIngestStatus(userId, 'running');
   triggerBackgroundIngest(sessionSnapshot, userId);
   if (!wantsJson) return res.redirect('/dashboard');
   res.json({ status: 'running' });
+});
+
+router.get('/onboarding', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
+  if (ensureScopesForPage(sessionData, res)) return;
+  if (await ensureRefreshTokenForPage(sessionData, res)) return;
+  const userId = sessionData.user.id;
+  await ensureUserRecord(sessionData);
+  if (await isOnboardingComplete(userId)) {
+    return res.redirect('/dashboard');
+  }
+
+  const layout = await fs.readFile(path.join(process.cwd(), 'src/web/views/layout.html'), 'utf8');
+  const body = await fs.readFile(path.join(process.cwd(), 'src/web/views/onboarding.html'), 'utf8');
+  const html = layout.replace('<!--CONTENT-->', body);
+  res.send(html);
+});
+
+router.post('/onboarding/complete', async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) return res.redirect('/auth/google');
+  const userId = sessionData.user.id;
+  await prisma.user.update({
+    where: { id: userId },
+    data: { onboardingCompletedAt: new Date() }
+  });
+  sessionData.skipAutoIngest = true;
+  res.redirect('/dashboard');
 });
 
 router.get('/ingest/status', async (req: Request, res: Response) => {
@@ -306,7 +331,7 @@ router.get('/ingest/status', async (req: Request, res: Response) => {
   }
   if (ensureScopesForApi(sessionData, res)) return;
   if (await ensureRefreshTokenForApi(sessionData, res)) return;
-  const state = ingestStatus.get(userId) || { status: 'idle', updatedAt: Date.now() };
+  const state = getIngestStatus(userId);
   res.json({ status: state.status, updatedAt: state.updatedAt, error: state.error });
 });
 
@@ -1742,6 +1767,14 @@ async function ensureUserRecord(sessionData: any) {
   });
 }
 
+async function isOnboardingComplete(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { onboardingCompletedAt: true }
+  });
+  return Boolean(user?.onboardingCompletedAt);
+}
+
 function scopedLogger(scope: string) {
   return (message: string, extra?: Record<string, unknown>) => {
     if (extra && Object.keys(extra).length) {
@@ -1761,31 +1794,6 @@ function createTraceId() {
     return crypto.randomUUID();
   }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function triggerBackgroundIngest(sessionData: any, userId: string) {
-  ingestInbox(sessionData)
-    .then(() => {
-      markIngestStatus(userId, 'done');
-    })
-    .catch((err: unknown) => {
-      if (err instanceof MissingScopeError) {
-        markIngestStatus(userId, 'error', 'Google permissions changed. Please reconnect your Google account.');
-        return;
-      }
-      const gaxios = err instanceof GaxiosError ? err : undefined;
-      const message = gaxios?.response?.status === 403
-        ? 'Gmail refused to share inbox data. Please reconnect your Google account.'
-        : 'Unable to sync your Gmail inbox right now. Please try again.';
-      markIngestStatus(userId, 'error', message);
-    });
-}
-
-function markIngestStatus(userId: string, status: 'idle' | 'running' | 'done' | 'error', error?: string) {
-  ingestStatus.set(userId, { status, updatedAt: Date.now(), error });
-  if (status === 'done' || status === 'error') {
-    setTimeout(() => ingestStatus.delete(userId), 5 * 60 * 1000); // clean up after a bit
-  }
 }
 
 function cloneSessionForIngest(sessionData: any) {
