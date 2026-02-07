@@ -59,7 +59,7 @@
   ];
 
   let current = 0;
-  let playing = false;
+  let renderToken = 0;
 
   function setStatusCopy(text) {
     if (!statusEl || !text) return;
@@ -127,16 +127,19 @@
     return typing;
   }
 
-  async function playChat(messages) {
+  async function playChat(messages, token) {
     chatLog.innerHTML = '';
     for (const message of messages) {
+      if (token !== renderToken) return;
       if (message.role === 'assistant') {
         const typing = renderTyping();
         await wait(500 + Math.random() * 600);
+        if (token !== renderToken) return;
         typing.remove();
       }
       renderChatMessage(message);
       await wait(260 + Math.random() * 260);
+      if (token !== renderToken) return;
     }
   }
 
@@ -147,10 +150,9 @@
   async function renderStep(index) {
     const step = steps[index];
     if (!step) return;
+    const token = ++renderToken;
     current = index;
-    playing = true;
     backBtn.disabled = current === 0;
-    nextBtn.disabled = true;
     nextBtn.textContent = current === steps.length - 1 ? 'Open inbox' : 'Next';
 
     titleEl.textContent = step.title;
@@ -158,19 +160,17 @@
     renderPills(step.pills);
     renderProgress();
     renderActions(step.actions);
-    await playChat(step.chat);
+    await playChat(step.chat, token);
 
-    playing = false;
-    nextBtn.disabled = false;
+    if (token !== renderToken) return;
   }
 
   backBtn.addEventListener('click', () => {
-    if (playing || current === 0) return;
+    if (current === 0) return;
     renderStep(current - 1);
   });
 
   nextBtn.addEventListener('click', () => {
-    if (playing) return;
     if (current === steps.length - 1) {
       form.submit();
       return;
