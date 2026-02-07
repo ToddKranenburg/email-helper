@@ -161,6 +161,14 @@
     priorityMeta: new Map(),
     prioritySource: hasServerPriority ? 'server' : 'local',
     priorityLoading: false,
+    priorityReady: false,
+    priorityReadyAnnounced: false,
+    priorityWaitingNotified: false,
+    prioritySwitchPending: false,
+    prioritySwitchInProgress: false,
+    userEngagedInbox: false,
+    pendingPriorityAnnouncement: '',
+    autoSelectBlocked: false,
     prioritySyncStartAt: 0,
     priorityLastBatchAt: parseTimestamp(priorityBatchFinishedAt),
     priorityProgress: normalizePriorityProgress(priorityProgress),
@@ -258,6 +266,7 @@
   init();
 
   function init() {
+    state.priorityReady = state.priority.length > 0;
     state.prioritySyncStartAt = readPrioritySyncStart();
     if (state.prioritySyncStartAt && (!state.priorityLastBatchAt || state.priorityLastBatchAt < state.prioritySyncStartAt)) {
       state.priorityLoading = true;
@@ -274,8 +283,16 @@
     startPriorityPolling();
 
     if (state.needs.length) {
-      const startId = getNextReviewCandidate() || state.needs[0];
-      setActiveThread(startId, { source: 'init' });
+      state.autoSelectBlocked = isPriorityWaiting();
+      if (state.autoSelectBlocked) {
+        setEmptyState('I\'m prioritizing your inbox to find emails that need your attention. You can wait here, or jump into your full inbox and start reviewing anytime.');
+        toggleComposer(false);
+      } else {
+        const startId = getPriorityFirstCandidate() || state.needs[0];
+        setActiveThread(startId, { source: 'init' });
+        maybeAnnouncePriorityWaiting();
+        maybeSwitchToPriority('init');
+      }
     } else {
       setEmptyState('No emails queued. Tap Sync Gmail to pull fresh ones.');
       toggleComposer(false);
@@ -299,39 +316,56 @@
     }
 
     if (refs.reviewBtn) {
-      refs.reviewBtn.addEventListener('click', () => requestReview());
+      refs.reviewBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        requestReview();
+      });
     }
     if (refs.replyBtn) {
-      refs.replyBtn.addEventListener('click', () => openReplyPanel());
+      refs.replyBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        openReplyPanel();
+      });
     }
     if (refs.archiveBtn) {
-      refs.archiveBtn.addEventListener('click', () => archiveCurrent('button'));
+      refs.archiveBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        archiveCurrent('button');
+      });
     }
     if (refs.unsubscribeBtn) {
-      refs.unsubscribeBtn.addEventListener('click', () => unsubscribeCurrent('button'));
+      refs.unsubscribeBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        unsubscribeCurrent('button');
+      });
     }
     if (refs.openLinkBtn) {
-      refs.openLinkBtn.addEventListener('click', () => openSuggestedLinks('button'));
+      refs.openLinkBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        openSuggestedLinks('button');
+      });
     }
     if (refs.taskBtn) {
       refs.taskBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
         if (state.activeId) requestDraft(state.activeId, 'generate');
       });
     }
     if (refs.skipBtn) {
-      refs.skipBtn.addEventListener('click', () => skipCurrent('button'));
+      refs.skipBtn.addEventListener('click', () => {
+        markUserEngagedIfInbox(state.activeId);
+        skipCurrent('button');
+      });
     }
 
     if (refs.loadMoreHead) {
-      refs.loadMoreHead.addEventListener('click', async () => {
-        await fetchNextPage('heading');
-        nudgeComposer(DEFAULT_NUDGE, { focus: false });
+      refs.loadMoreHead.addEventListener('click', () => {
+        handleReviewLatestClick();
       });
     }
     if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.addEventListener('click', async () => {
-        await fetchNextPage('empty-card');
-        nudgeComposer(DEFAULT_NUDGE, { focus: false });
+      refs.loadMoreEmpty.addEventListener('click', () => {
+        handleReviewLatestClick();
       });
     }
 
@@ -392,6 +426,9 @@
     if (!target) return;
     const threadId = target.dataset.threadId;
     if (!threadId || !state.lookup.has(threadId)) return;
+    if (variant !== 'priority') {
+      markUserEngagedIfInbox(threadId);
+    }
     if (variant === 'drawer') toggleDrawer(false);
     setActiveThread(threadId, { source: 'user' });
   }
@@ -463,6 +500,7 @@
   async function handleChatSubmit(event) {
     event.preventDefault();
     if (!state.activeId) return;
+    markUserEngagedIfInbox(state.activeId);
     const question = refs.chatInput.value.trim();
     if (!question) return;
 
@@ -582,6 +620,7 @@
   async function handleSuggestedActionClick(threadId, actionType) {
     const normalized = normalizeSuggestedAction(actionType);
     if (!normalized) return;
+    markUserEngagedIfInbox(threadId);
     clearPendingSuggestedAction(threadId);
     if (normalized === 'reply') {
       if (threadId && threadId !== state.activeId) setActiveThread(threadId, { source: 'user' });
@@ -779,6 +818,10 @@
       if (!state.activeId && state.needs.length && reason !== 'auto') {
         const nextId = getNextReviewCandidate() || state.needs[0];
         setActiveThread(nextId, { source: 'user' });
+        if (!isPriorityWaiting()) {
+          const nextId = getNextReviewCandidate() || state.needs[0];
+          setActiveThread(nextId);
+        }
       }
       return added;
     } catch (err) {
@@ -798,6 +841,9 @@
     if (state.activeId === threadId) return;
     const wasSeen = state.seenThreads.has(threadId);
     const source = typeof options.source === 'string' ? options.source : 'auto';
+    if (state.autoSelectBlocked && source === 'auto' && !isPriorityThread(threadId)) {
+      return;
+    }
     clearAutoAdvance();
     state.snapThreadId = threadId;
     state.activeId = threadId;
@@ -824,6 +870,10 @@
 
     refs.emailEmpty.classList.add('hidden');
     updateEmailCard(thread);
+    if (state.pendingPriorityAnnouncement && isPriorityThread(threadId)) {
+      appendTurn(threadId, { role: 'assistant', content: state.pendingPriorityAnnouncement });
+      state.pendingPriorityAnnouncement = '';
+    }
     insertThreadDivider(threadId);
     startThreadLoadTyping(threadId);
     hydrateThreadTimeline(threadId);
@@ -842,6 +892,7 @@
       enqueueAssistantMessage(threadId, prompt);
     }
     state.seenThreads.add(threadId);
+    maybeAnnouncePriorityWaiting();
 
     const pendingCount = pendingTranscripts.get(threadId)?.length || 0;
     const serverItems = state.serverTimelines.get(threadId) || [];
@@ -1620,25 +1671,16 @@
   }
 
   function updateLoadMoreButtons() {
+    const canReview = state.needs.length > 0;
     if (refs.loadMoreHead) {
       refs.loadMoreHead.classList.remove('hidden');
-      if (state.hasMore) {
-        refs.loadMoreHead.disabled = state.loadingMore;
-        refs.loadMoreHead.textContent = state.loadingMore ? 'Loading…' : 'Load more';
-      } else {
-        refs.loadMoreHead.disabled = true;
-        refs.loadMoreHead.textContent = 'All emails loaded';
-      }
+      refs.loadMoreHead.disabled = !canReview;
+      refs.loadMoreHead.textContent = 'Review latest emails';
     }
     if (refs.loadMoreEmpty) {
       refs.loadMoreEmpty.classList.remove('hidden');
-      if (state.hasMore) {
-        refs.loadMoreEmpty.disabled = state.loadingMore;
-        refs.loadMoreEmpty.textContent = state.loadingMore ? 'Loading…' : 'Load more';
-      } else {
-        refs.loadMoreEmpty.disabled = true;
-        refs.loadMoreEmpty.textContent = 'All emails loaded';
-      }
+      refs.loadMoreEmpty.disabled = !canReview;
+      refs.loadMoreEmpty.textContent = 'Review latest emails';
     }
   }
 
@@ -1652,6 +1694,12 @@
 
   function markReviewed(threadId) {
     if (threadId) reviewedIds.add(threadId);
+  }
+
+  function markUserEngaged() {
+    if (state.prioritySwitchInProgress) return;
+    state.userEngagedInbox = true;
+    state.autoSelectBlocked = false;
   }
 
   function updateProgress() {
@@ -1785,6 +1833,7 @@
     updatePriorityProgress();
     updateQueuePill();
     updateDrawerLists();
+    syncPriorityReadiness();
   }
 
   function getThreadListIds(variant) {
@@ -1824,7 +1873,7 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = buildThreadClass(variant, { loadMore: true });
-      btn.textContent = state.loadingMore ? 'Loading…' : 'Load more';
+      btn.textContent = state.loadingMore ? 'Loading…' : 'Review latest emails';
       btn.disabled = state.loadingMore;
       li.appendChild(btn);
       listEl.appendChild(li);
@@ -1867,6 +1916,7 @@
           state.priorityMeta.delete(key);
         }
       }
+      syncPriorityReadiness();
       return;
     }
     const scored = [];
@@ -1894,6 +1944,152 @@
       return bTime - aTime;
     });
     state.priority = scored.slice(0, PRIORITY_LIMIT).map(item => item.threadId);
+    syncPriorityReadiness();
+  }
+
+  function syncPriorityReadiness() {
+    const wasReady = state.priorityReady;
+    const nowReady = state.priority.length > 0;
+    state.priorityReady = nowReady;
+    if (!nowReady) {
+      state.prioritySwitchPending = false;
+      return;
+    }
+    state.autoSelectBlocked = false;
+    if (!wasReady) {
+      maybeSwitchToPriority('ready');
+    }
+  }
+
+  function isPriorityWaiting() {
+    if (state.priority.length > 0) return false;
+    const progress = state.priorityProgress;
+    if (state.priorityLoading) return true;
+    if (progress && progress.totalCount === 0) return true;
+    if (progress && progress.prioritizedCount < progress.totalCount) return true;
+    return false;
+  }
+
+  function isPriorityThread(threadId) {
+    if (!threadId) return false;
+    return state.priority.includes(threadId);
+  }
+
+  function getNextPriorityCandidate() {
+    if (!state.priority.length) return '';
+    const needsSet = new Set(state.needs);
+    for (let i = 0; i < state.priority.length; i += 1) {
+      const candidate = state.priority[i];
+      if (!needsSet.has(candidate)) continue;
+      if (!reviewedIds.has(candidate)) return candidate;
+    }
+    return '';
+  }
+
+  function getPriorityFirstCandidate() {
+    const priorityCandidate = getNextPriorityCandidate();
+    if (priorityCandidate) return priorityCandidate;
+    return getNextReviewCandidate();
+  }
+
+  function maybeAnnouncePriorityWaiting() {
+    if (!state.activeId) return;
+    if (state.priorityWaitingNotified) return;
+    if (state.userEngagedInbox) return;
+    if (state.priority.length > 0) return;
+    const progress = state.priorityProgress;
+    const prioritizing = state.priorityLoading || (progress && progress.prioritizedCount < progress.totalCount);
+    if (!prioritizing) return;
+    state.priorityWaitingNotified = true;
+    enqueueAssistantMessage(
+      state.activeId,
+      'I\'m prioritizing your inbox to find emails that need your attention. You can wait here, or jump into your full inbox and start reviewing anytime.'
+    );
+  }
+
+  function maybeSwitchToPriority(source) {
+    if (!state.priority.length) return;
+    if (state.prioritySwitchInProgress) return;
+    if (state.activeId && isPriorityThread(state.activeId)) {
+      state.prioritySwitchPending = false;
+      return;
+    }
+    if (!state.activeId && !state.userEngagedInbox) {
+      const nextPriority = getNextPriorityCandidate();
+      if (!nextPriority) return;
+      state.prioritySwitchInProgress = true;
+      state.pendingPriorityAnnouncement = 'Priority emails are ready to review. Starting with the top priority email.';
+      setEmptyState('Priority emails are ready to review. Starting with the top priority email.');
+      window.setTimeout(() => {
+        setQueueSectionExpanded(refs.priorityQueue, refs.priorityToggle, true);
+        setQueueSectionExpanded(refs.reviewQueue, refs.queueToggle, false);
+        setActiveThread(nextPriority);
+      }, 0);
+      state.priorityReadyAnnounced = true;
+      state.prioritySwitchPending = false;
+      state.priorityWaitingNotified = false;
+      state.prioritySwitchInProgress = false;
+      return;
+    }
+    if (state.userEngagedInbox) {
+      state.prioritySwitchPending = true;
+      return;
+    }
+    const nextPriority = getNextPriorityCandidate();
+    if (!nextPriority) return;
+    const announce = state.priorityWaitingNotified && !state.priorityReadyAnnounced;
+    const originId = state.activeId;
+    state.prioritySwitchInProgress = true;
+    const finishSwitch = () => {
+      state.priorityReadyAnnounced = true;
+      state.prioritySwitchPending = false;
+      state.priorityWaitingNotified = false;
+      setQueueSectionExpanded(refs.priorityQueue, refs.priorityToggle, true);
+      setQueueSectionExpanded(refs.reviewQueue, refs.queueToggle, false);
+      setActiveThread(nextPriority);
+      state.prioritySwitchInProgress = false;
+    };
+    if (announce && originId) {
+      enqueueAssistantMessage(originId, 'Priority emails are ready to review. Starting with the top priority email.')
+        .then(() => {
+          if (state.activeId === originId) {
+            finishSwitch();
+          } else {
+            state.prioritySwitchInProgress = false;
+          }
+        });
+    } else {
+      finishSwitch();
+    }
+  }
+
+  function maybeSwitchToPriorityAfterResolve() {
+    if (!state.prioritySwitchPending) return false;
+    const nextPriority = getNextPriorityCandidate();
+    state.prioritySwitchPending = false;
+    if (!nextPriority) return false;
+    state.prioritySwitchInProgress = true;
+    const originId = state.activeId;
+    const announce = originId
+      ? enqueueAssistantMessage(originId, 'Priority emails are ready to review. Starting with the top priority email.')
+      : Promise.resolve();
+    announce.then(() => {
+      setQueueSectionExpanded(refs.priorityQueue, refs.priorityToggle, true);
+      setQueueSectionExpanded(refs.reviewQueue, refs.queueToggle, false);
+      setActiveThread(nextPriority);
+      state.priorityReadyAnnounced = true;
+      state.prioritySwitchInProgress = false;
+    });
+    return true;
+  }
+
+  function markUserEngagedIfInbox(threadId = state.activeId) {
+    if (!threadId) return;
+    if (isPriorityThread(threadId)) return;
+    markUserEngaged();
+    if (state.priorityReady && state.priority.length) {
+      state.prioritySwitchPending = true;
+    }
   }
 
   function scoreThreadPriority(thread) {
@@ -2701,7 +2897,7 @@
   }
 
   function chatPlaceholder() {
-    return '<div class="chat-placeholder-card">I’ll drop the gist and nudge you forward.</div>';
+    return '';
   }
 
   function setChatError(message) {
@@ -3145,6 +3341,10 @@
     closeReplyPanel(true);
     clearPendingSuggestedAction(threadId);
 
+    if (maybeSwitchToPriorityAfterResolve()) {
+      return;
+    }
+
     if (!state.needs.length) {
       if (state.hasMore) {
         autoLoadNextBatch();
@@ -3185,7 +3385,7 @@
     }
     if (!added.length) {
       const message = state.hasMore
-        ? 'Unable to load more emails. Tap Load more to retry.'
+        ? 'Unable to load more emails. Tap Review latest emails to retry.'
         : 'All emails reviewed. Nice work.';
       setEmptyState(message);
       toggleComposer(false);
@@ -3224,6 +3424,10 @@
     closeTaskPanel(true);
     closeReplyPanel(true);
     clearPendingSuggestedAction(threadId);
+
+    if (maybeSwitchToPriorityAfterResolve()) {
+      return;
+    }
     const nextId = getNextUnreviewedAfter(threadId, {
       order,
       startIndex: index + 1,
@@ -3251,7 +3455,11 @@
 
   function getReviewOrder() {
     if (!state.needs.length) return [];
-    return sortThreadIdsByReceivedAt(state.needs);
+    const needsSet = new Set(state.needs);
+    const priorityIds = state.priority.filter(id => needsSet.has(id) && !reviewedIds.has(id));
+    const prioritySet = new Set(priorityIds);
+    const remaining = state.needs.filter(id => !prioritySet.has(id));
+    return [...priorityIds, ...sortThreadIdsByReceivedAt(remaining)];
   }
 
   function sortThreadIdsByReceivedAt(ids) {
@@ -3626,7 +3834,7 @@
 
   function setEmptyState(message) {
     const fallback = state.hasMore
-      ? 'You reviewed everything loaded. Tap Load more to keep going.'
+      ? 'You reviewed everything loaded. Tap Review latest emails to keep going.'
       : 'All emails reviewed. Nice work.';
     const copy = message || fallback;
     closeTaskPanel(true);
@@ -3639,7 +3847,7 @@
     }
     if (refs.emailEmptyText) refs.emailEmptyText.textContent = copy;
     if (refs.loadMoreEmpty) {
-      refs.loadMoreEmpty.classList.toggle('hidden', !state.hasMore);
+      refs.loadMoreEmpty.classList.toggle('hidden', !state.needs.length);
     }
     renderChat();
     updateQueuePill();
@@ -3666,6 +3874,25 @@
     const expanded = !isCollapsed;
     toggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     toggleBtn.textContent = expanded ? 'Collapse' : 'Expand';
+  }
+
+  function setQueueSectionExpanded(sectionEl, toggleBtn, expanded) {
+    if (!sectionEl || !toggleBtn) return;
+    sectionEl.classList.toggle('is-collapsed', !expanded);
+    toggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    toggleBtn.textContent = expanded ? 'Collapse' : 'Expand';
+  }
+
+  function handleReviewLatestClick() {
+    if (!state.needs.length) return;
+    setQueueSectionExpanded(refs.priorityQueue, refs.priorityToggle, false);
+    setQueueSectionExpanded(refs.reviewQueue, refs.queueToggle, true);
+    const order = sortThreadIdsByReceivedAt(state.needs);
+    const firstId = order[0];
+    if (firstId) {
+      markUserEngagedIfInbox(firstId);
+      setActiveThread(firstId, { source: 'user' });
+    }
   }
 
   async function detectIntent(text) {
