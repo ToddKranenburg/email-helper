@@ -142,6 +142,9 @@
       grid-template-columns: 1fr;
     }
     @media (max-width: 1024px) {
+      :root {
+        --mobile-header-h: calc(56px + env(safe-area-inset-top, 0px));
+      }
       html, body {
         height: 100%;
       }
@@ -152,11 +155,16 @@
         border-radius: 0;
         border-left: none;
         border-right: none;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        height: var(--mobile-header-h);
+        min-height: var(--mobile-header-h);
       }
       .triage-shell {
         grid-template-columns: 1fr;
-        height: 100dvh;
-        min-height: 100dvh;
+        height: calc(100dvh - var(--mobile-header-h));
+        min-height: calc(100dvh - var(--mobile-header-h));
         gap: 0;
       }
       .triage-app {
@@ -165,10 +173,12 @@
         max-width: none;
       }
       .chat-pane {
-        height: 100dvh;
+        height: 100%;
         border-radius: 0;
         border-left: none;
         border-right: none;
+        display: flex;
+        flex-direction: column;
       }
       .chat-sidebar {
         border-radius: 0;
@@ -187,12 +197,47 @@
       }
       .assistant-stack {
         height: 100%;
+        flex: 1;
+        min-height: 0;
       }
       .assistant-wallpaper {
         padding-left: 12px;
+        height: 100%;
+        flex: 1;
+        min-height: 0;
+        padding-bottom: 4px;
       }
       .chat-divider.is-pinned {
         top: 0;
+      }
+      .assistant-dropdown-menu {
+        top: auto;
+        bottom: calc(100% + 10px);
+      }
+      .assistant-controls {
+        margin-top: auto;
+        padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+        background: #fff;
+        border-top: 1px solid rgba(60, 60, 67, 0.24);
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 20;
+        border-radius: 0;
+        padding-left: 12px;
+        padding-right: 12px;
+        box-shadow: none;
+      }
+      .assistant-chat {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding-bottom: 4px;
+        background: #fff;
+        scroll-padding-bottom: 4px;
+      }
+      .review-queue {
+        margin-top: auto;
       }
     }
     @media (min-width: 1025px) {
@@ -564,6 +609,81 @@
       flex-direction: column;
       gap: 8px;
     }
+    .assistant-controls > .quick-actions-head,
+    .assistant-controls > .triage-actions {
+      display: none;
+    }
+    .assistant-composer {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      width: 100%;
+    }
+    .assistant-dropdown {
+      position: relative;
+      flex-shrink: 0;
+    }
+    .assistant-dropdown-toggle {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      border: 1px solid rgba(60, 60, 67, 0.16);
+      background: #fff;
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: none;
+    }
+    .assistant-dropdown-toggle:hover {
+      border-color: rgba(0, 122, 255, 0.35);
+      background: rgba(0, 122, 255, 0.06);
+      color: var(--accent);
+    }
+    .assistant-dropdown-toggle:active {
+      transform: translateY(1px);
+    }
+    .assistant-dropdown-toggle:focus-visible {
+      outline: 2px solid rgba(0,122,255,0.45);
+      outline-offset: 2px;
+    }
+    .assistant-dropdown-menu {
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 10px);
+      min-width: 240px;
+      background: #fff;
+      border: 1px solid rgba(60, 60, 67, 0.12);
+      border-radius: 14px;
+      padding: 10px;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.12);
+      opacity: 0;
+      transform: translateY(6px);
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 8;
+    }
+    .assistant-dropdown.is-open .assistant-dropdown-menu {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .assistant-dropdown-header {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 700;
+      margin: 2px 4px 10px;
+    }
+    .assistant-dropdown .triage-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
     .assistant-topbar {
       display: flex;
       justify-content: space-between;
@@ -611,11 +731,52 @@
       padding: 0 4px 6px;
       overflow-y: auto;
       min-height: 0;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+      position: relative;
+    }
+    .assistant-chat::before {
+      content: '';
+      position: sticky;
+      top: 0;
+      display: block;
+      height: 18px;
+      margin-top: -1px;
+      background: linear-gradient(to bottom, rgba(255,255,255,1), rgba(255,255,255,0.55), rgba(255,255,255,0));
+      border-top: 1px solid rgba(60, 60, 67, 0.08);
+      z-index: 2;
+      pointer-events: none;
+    }
+    .assistant-chat:hover,
+    .assistant-chat:active,
+    .assistant-chat:focus-within,
+    .assistant-chat.is-scrolling {
+      scrollbar-color: rgba(60, 60, 67, 0.35) transparent;
+    }
+    .assistant-chat::-webkit-scrollbar {
+      width: 0;
+    }
+    .assistant-chat:hover::-webkit-scrollbar,
+    .assistant-chat:active::-webkit-scrollbar,
+    .assistant-chat:focus-within::-webkit-scrollbar,
+    .assistant-chat.is-scrolling::-webkit-scrollbar {
+      width: 8px;
+    }
+    .assistant-chat::-webkit-scrollbar-thumb {
+      background: rgba(60, 60, 67, 0.35);
+      border-radius: 999px;
+    }
+    .assistant-chat::-webkit-scrollbar-track {
+      background: transparent;
     }
     .chat-stream {
       display: flex;
       flex-direction: column;
       gap: 14px;
+    }
+    .chat-footer-spacer {
+      flex: 0 0 auto;
+      width: 100%;
     }
     .chat-divider {
       display: block;
@@ -629,11 +790,15 @@
       background-size: cover;
       align-self: stretch;
       width: 100%;
+      border-radius: 0;
     }
     .chat-divider.is-pinned {
       position: sticky;
       top: 0;
       z-index: 3;
+      background: var(--chat-bg);
+      border-bottom: 1px solid rgba(60, 60, 67, 0.12);
+      border-radius: 0;
     }
     .chat-divider-line {
       display: none;
@@ -1073,6 +1238,7 @@
       align-items: center;
       box-shadow: none;
       margin-top: 4px;
+      width: 100%;
     }
     .assistant-input.nudged {
       border-color: var(--accent);

@@ -71,40 +71,6 @@
             </div>
           </div>
           <div class="assistant-controls">
-            <div class="quick-actions-head">
-              <p class="context-label">Suggested moves</p>
-              <p class="context-helper">Tap to steer the bot without typing.</p>
-            </div>
-            <div class="triage-actions compact-actions" aria-label="Suggested moves">
-              <button class="triage-btn review" id="action-review" type="button">
-                <span class="action-icon" aria-hidden="true">👀</span>
-                <span>More info</span>
-              </button>
-              <button class="triage-btn reply" id="action-reply" type="button">
-                <span class="action-icon" aria-hidden="true">✉️</span>
-                <span>Reply</span>
-              </button>
-              <button class="triage-btn archive" id="action-archive" type="button">
-                <span class="action-icon" aria-hidden="true">🗄️</span>
-                <span>Archive</span>
-              </button>
-              <button class="triage-btn unsubscribe" id="action-unsubscribe" type="button">
-                <span class="action-icon" aria-hidden="true">🔕</span>
-                <span>Unsubscribe</span>
-              </button>
-              <button class="triage-btn open-link" id="action-open-link" type="button">
-                <span class="action-icon" aria-hidden="true">🔗</span>
-                <span>Open link</span>
-              </button>
-              <button class="triage-btn task" id="action-task" type="button">
-                <span class="action-icon" aria-hidden="true">📝</span>
-                <span>Create task</span>
-              </button>
-              <button class="triage-btn skip" id="action-skip" type="button">
-                <span class="action-icon" aria-hidden="true">⏭️</span>
-                <span>Skip</span>
-              </button>
-            </div>
             <section class="task-panel hidden" id="task-panel" aria-live="polite">
               <div class="task-panel-head">
                 <div>
@@ -167,13 +133,53 @@
                 <button class="reply-submit" id="reply-submit" type="button">Send reply</button>
               </div>
             </section>
-            <form id="assistant-form" class="assistant-input">
-              <label class="sr-only" for="assistant-input-field">Ask the assistant anything</label>
-              <textarea id="assistant-input-field" placeholder="Type a message…" rows="1"></textarea>
-              <button type="submit">Send</button>
-            </form>
+            <div class="assistant-composer">
+              <div class="assistant-dropdown" id="assistant-dropdown">
+                <button class="assistant-dropdown-toggle" id="assistant-actions-toggle" type="button" aria-expanded="false" aria-haspopup="true">
+                  <span class="assistant-dropdown-icon" aria-hidden="true">✦</span>
+                  <span class="sr-only">Suggested moves</span>
+                </button>
+                <div class="assistant-dropdown-menu" id="assistant-actions-menu" role="menu" aria-label="Suggested moves">
+                  <div class="assistant-dropdown-header">Suggested moves</div>
+                  <div class="triage-actions compact-actions" aria-label="Suggested moves">
+                    <button class="triage-btn review" id="action-review" type="button">
+                      <span class="action-icon" aria-hidden="true">👀</span>
+                      <span>More info</span>
+                    </button>
+                    <button class="triage-btn reply" id="action-reply" type="button">
+                      <span class="action-icon" aria-hidden="true">✉️</span>
+                      <span>Reply</span>
+                    </button>
+                    <button class="triage-btn archive" id="action-archive" type="button">
+                      <span class="action-icon" aria-hidden="true">🗄️</span>
+                      <span>Archive</span>
+                    </button>
+                    <button class="triage-btn unsubscribe" id="action-unsubscribe" type="button">
+                      <span class="action-icon" aria-hidden="true">🔕</span>
+                      <span>Unsubscribe</span>
+                    </button>
+                    <button class="triage-btn open-link" id="action-open-link" type="button">
+                      <span class="action-icon" aria-hidden="true">🔗</span>
+                      <span>Open link</span>
+                    </button>
+                    <button class="triage-btn task" id="action-task" type="button">
+                      <span class="action-icon" aria-hidden="true">📝</span>
+                      <span>Create task</span>
+                    </button>
+                    <button class="triage-btn skip" id="action-skip" type="button">
+                      <span class="action-icon" aria-hidden="true">⏭️</span>
+                      <span>Skip</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <form id="assistant-form" class="assistant-input">
+                <label class="sr-only" for="assistant-input-field">Ask the assistant anything</label>
+                <textarea id="assistant-input-field" placeholder="Type a message…" rows="1"></textarea>
+                <button type="submit">Send</button>
+              </form>
+            </div>
             <div class="assistant-meta">
-              <span id="assistant-hint">Chat is scoped to this email. Up to 20 questions per thread.</span>
               <span class="chat-error hidden" id="assistant-error"></span>
             </div>
           </div>

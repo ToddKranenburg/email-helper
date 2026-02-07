@@ -146,11 +146,15 @@
     reviewList: document.getElementById('review-list'),
     syncForm: document.getElementById('ingest-form'),
     sidebarToggle: document.getElementById('sidebar-expand'),
-    sidebarBack: document.getElementById('sidebar-back')
+    sidebarBack: document.getElementById('sidebar-back'),
+    actionsDropdown: document.getElementById('assistant-dropdown'),
+    actionsToggle: document.getElementById('assistant-actions-toggle'),
+    actionsMenu: document.getElementById('assistant-actions-menu')
   };
   const loadingOverlay = document.getElementById('loading');
   const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
   const OVERLAY_OWNER = 'secretary';
+  let scrollHideTimer = 0;
 
   if (!refs.chatLog || !refs.chatForm || !refs.emailEmpty) {
     return;
@@ -161,6 +165,7 @@
   const desktopSyncSlot = document.getElementById('desktop-sync-slot');
   const syncFormEl = document.getElementById('ingest-form');
   const syncMetaEl = document.getElementById('sync-meta');
+  const composerEl = document.querySelector('.assistant-controls');
 
   function moveSyncToDesktop() {
     if (!desktopSyncSlot || !syncFormEl || !syncMetaEl) return;
@@ -242,6 +247,66 @@
     mobileSidebarMedia.addListener(syncSidebarForViewport);
   }
   syncSidebarForViewport();
+
+  function showScrollbarTemporarily() {
+    if (!refs.chatScroll) return;
+    refs.chatScroll.classList.add('is-scrolling');
+    if (scrollHideTimer) window.clearTimeout(scrollHideTimer);
+    scrollHideTimer = window.setTimeout(() => {
+      refs.chatScroll?.classList.remove('is-scrolling');
+    }, 700);
+  }
+
+  if (refs.chatScroll) {
+    refs.chatScroll.addEventListener('scroll', () => {
+      showScrollbarTemporarily();
+    }, { passive: true });
+  }
+
+  function updateComposerHeight() {
+    if (!composerEl) return;
+    const height = composerEl.getBoundingClientRect().height;
+    if (!height) return;
+    document.documentElement.style.setProperty('--composer-h', `${Math.ceil(height)}px`);
+    ensureFooterSpacer();
+  }
+
+  if (composerEl && 'ResizeObserver' in window) {
+    const observer = new ResizeObserver(() => updateComposerHeight());
+    observer.observe(composerEl);
+  }
+  window.addEventListener('resize', updateComposerHeight);
+  updateComposerHeight();
+
+  function setActionsOpen(open) {
+    if (!refs.actionsDropdown || !refs.actionsToggle) return;
+    refs.actionsDropdown.classList.toggle('is-open', open);
+    refs.actionsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  if (refs.actionsToggle) {
+    refs.actionsToggle.addEventListener('click', () => {
+      const isOpen = refs.actionsDropdown?.classList.contains('is-open');
+      setActionsOpen(!isOpen);
+    });
+  }
+
+  if (refs.actionsMenu) {
+    refs.actionsMenu.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('button')) {
+        setActionsOpen(false);
+      }
+    });
+  }
+
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('#assistant-dropdown')) return;
+    setActionsOpen(false);
+  });
 
   const DEFAULT_PLACEHOLDER = refs.chatInput?.placeholder || 'Type a message…';
   const SUGGESTED_PLACEHOLDER = 'Press Enter to accept • or type to respond…';
@@ -2609,16 +2674,8 @@
 
   function updateHint(threadId) {
     if (!refs.chatHint) return;
-    if (!MAX_TURNS || !threadId) {
-      refs.chatHint.textContent = 'Ask anything or tap Archive / More actions.';
-      return;
-    }
-    const history = ensureHistory(threadId);
-    const asked = history.filter(turn => turn.role === 'user').length;
-    const remaining = Math.max(0, MAX_TURNS - asked);
-    refs.chatHint.textContent = remaining
-      ? `${remaining} question${remaining === 1 ? '' : 's'} left on this email.`
-      : 'Chat limit reached here.';
+    if (!refs.chatHint) return;
+    refs.chatHint.textContent = '';
   }
 
   function updateComposerPlaceholder(threadId = state.activeId) {
@@ -2773,6 +2830,33 @@
     });
   }
 
+  function getComposerOffset() {
+    if (!composerEl) return 0;
+    const cssValue = getComputedStyle(document.documentElement).getPropertyValue('--composer-h').trim();
+    const parsed = Number.parseFloat(cssValue);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return composerEl.getBoundingClientRect().height || 0;
+  }
+
+  function scrollChatToBottom() {
+    if (!refs.chatScroll) return;
+    window.requestAnimationFrame(() => {
+      refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+    });
+  }
+
+  function ensureFooterSpacer() {
+    if (!refs.chatLog) return;
+    let spacer = refs.chatLog.querySelector('.chat-footer-spacer');
+    if (!spacer) {
+      spacer = document.createElement('div');
+      spacer.className = 'chat-footer-spacer';
+      refs.chatLog.appendChild(spacer);
+    }
+    const height = Math.max(0, getComposerOffset() - 32);
+    spacer.style.height = height ? `${Math.ceil(height)}px` : '0px';
+  }
+
   function renderChat(threadId = state.activeId, options = {}) {
     if (!refs.chatLog) return;
     const timeline = state.timeline.slice();
@@ -2799,13 +2883,15 @@
       markup += typingIndicatorHtml();
     }
     refs.chatLog.innerHTML = markup;
+    ensureFooterSpacer();
     const scrollMode = options.scrollMode || (state.snapThreadId === threadId ? 'divider' : 'bottom');
     if (refs.chatScroll) {
       if (scrollMode === 'divider') {
         snapToPinnedDivider(threadId);
       } else if (scrollMode === 'bottom') {
-        refs.chatScroll.scrollTop = refs.chatScroll.scrollHeight;
+        scrollChatToBottom();
       }
+      showScrollbarTemporarily();
     }
     updateComposerPlaceholder(threadId);
   }
