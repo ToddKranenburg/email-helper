@@ -1656,7 +1656,7 @@
     }
     const remaining = state.priority.length;
     if (remaining) {
-      refs.priorityPill.textContent = `${remaining} need attention`;
+      refs.priorityPill.textContent = `Found ${remaining} emails to address`;
       return;
     }
     refs.priorityPill.textContent = state.needs.length ? 'All clear' : 'No priority mail';
@@ -1681,7 +1681,7 @@
     }
     const needsSpinner = prioritized < progress.totalCount;
     const spinner = needsSpinner ? '<span class="priority-mini-spinner" aria-hidden="true"></span>' : '';
-    refs.priorityProgress.innerHTML = `${spinner}<span>Prioritized ${prioritized} of ${progress.totalCount}</span>`;
+    refs.priorityProgress.innerHTML = `${spinner}<span>Reviewed ${prioritized} of ${progress.totalCount}</span>`;
   }
 
   function updateLoadMoreButtons() {
