@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Magic Runner</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
   <style>
@@ -53,63 +54,30 @@
       position: relative;
       z-index: 1;
     }
-    .triage-header {
-      display: flex;
-      justify-content: space-between;
+    .shared-header {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
       align-items: center;
       gap: 12px;
       padding: 10px 14px;
-      background: rgba(255,255,255,0.92);
-      color: var(--text);
-      border-radius: 10px;
+      background: rgba(255,255,255,0.96);
       border: 1px solid rgba(60, 60, 67, 0.08);
-      box-shadow: none;
-      flex-wrap: wrap;
+      border-radius: 12px;
     }
-    .triage-label {
-      margin: 0;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 700;
-    }
-    .triage-header .triage-label {
-      color: var(--muted);
-    }
-    .hero-left {
-      display: flex;
+    .shared-header-center {
+      display: inline-flex;
       align-items: center;
       gap: 10px;
-      flex: 1;
-      min-width: 240px;
+      justify-content: center;
+      white-space: nowrap;
     }
-    .logo-mark {
-      width: 30px;
-      height: 30px;
-      border-radius: 8px;
-      background: rgba(0,122,255,0.12);
-      display: grid;
-      place-items: center;
-      font-weight: 800;
-      font-size: 16px;
-      color: var(--accent);
-    }
-    .hero-subtitle {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .triage-controls {
+    .shared-header-slot {
       display: flex;
-      gap: 8px;
       align-items: center;
-      flex-wrap: nowrap;
+      min-width: 0;
     }
-    @media (max-width: 720px) {
-      .triage-controls {
-        flex-wrap: wrap;
-      }
+    .shared-header-slot.right {
+      justify-content: flex-end;
     }
     .sync-meta {
       display: inline-flex;
@@ -167,10 +135,75 @@
       align-items: stretch;
       height: calc(100vh - 36px);
     }
+    body.sidebar-collapsed .chat-sidebar {
+      display: none;
+    }
+    body.sidebar-collapsed .triage-shell {
+      grid-template-columns: 1fr;
+    }
     @media (max-width: 1024px) {
+      html, body {
+        height: 100%;
+      }
+      body {
+        padding: 0;
+      }
+      .shared-header {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+      }
       .triage-shell {
         grid-template-columns: 1fr;
-        height: auto;
+        height: 100dvh;
+        min-height: 100dvh;
+        gap: 0;
+      }
+      .triage-app {
+        min-height: 100dvh;
+        height: 100dvh;
+        max-width: none;
+      }
+      .chat-pane {
+        height: 100dvh;
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+      }
+      .chat-sidebar {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        display: none;
+      }
+      body.queue-open .chat-sidebar {
+        display: flex;
+      }
+      body.queue-open .chat-pane {
+        display: none;
+      }
+      body.queue-open .triage-shell {
+        grid-template-columns: 1fr;
+      }
+      .assistant-stack {
+        height: 100%;
+      }
+      .assistant-wallpaper {
+        padding-left: 12px;
+      }
+      .chat-divider.is-pinned {
+        top: 0;
+      }
+    }
+    @media (min-width: 1025px) {
+      .mobile-expand {
+        display: none;
+      }
+      .shared-header {
+        display: none;
+      }
+      .triage-sync-bar {
+        display: flex;
       }
     }
     .chat-sidebar {
@@ -197,6 +230,74 @@
       box-shadow: none;
       height: 100%;
       min-height: 0;
+    }
+    .triage-sync-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(60, 60, 67, 0.08);
+      border-radius: 12px;
+    }
+    .mobile-expand {
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 6px 8px 6px 2px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .nav-forward::before {
+      content: '›';
+      display: inline-block;
+      margin-right: 2px;
+      font-size: 20px;
+      line-height: 1;
+      transform: translateY(1px);
+    }
+    .nav-back::before {
+      content: '‹';
+      display: inline-block;
+      margin-right: 2px;
+      font-size: 20px;
+      line-height: 1;
+      transform: translateY(1px);
+    }
+    .mobile-expand-label {
+      line-height: 1;
+    }
+    .sidebar-back {
+      display: none;
+    }
+    @media (max-width: 1024px) {
+      body .chat-sidebar {
+        display: none;
+      }
+      .triage-sync-bar {
+        display: none;
+      }
+      body.queue-open .chat-sidebar {
+        display: flex;
+      }
+      body.queue-open .chat-pane {
+        display: none;
+      }
+      body.queue-open .triage-shell {
+        grid-template-columns: 1fr;
+      }
+      body.queue-open #sidebar-expand {
+        display: none;
+      }
+      body:not(.queue-open) #sidebar-back {
+        display: none;
+      }
     }
     .chat-header {
       display: flex;

@@ -144,7 +144,9 @@
     replySubmit: document.getElementById('reply-submit'),
     replyClose: document.getElementById('reply-close'),
     reviewList: document.getElementById('review-list'),
-    syncForm: document.getElementById('ingest-form')
+    syncForm: document.getElementById('ingest-form'),
+    sidebarToggle: document.getElementById('sidebar-expand'),
+    sidebarBack: document.getElementById('sidebar-back')
   };
   const loadingOverlay = document.getElementById('loading');
   const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
@@ -153,6 +155,93 @@
   if (!refs.chatLog || !refs.chatForm || !refs.emailEmpty) {
     return;
   }
+
+  const mobileSidebarMedia = window.matchMedia('(max-width: 1024px)');
+  const sharedHeaderCenter = document.querySelector('.shared-header-center');
+  const desktopSyncSlot = document.getElementById('desktop-sync-slot');
+  const syncFormEl = document.getElementById('ingest-form');
+  const syncMetaEl = document.getElementById('sync-meta');
+
+  function moveSyncToDesktop() {
+    if (!desktopSyncSlot || !syncFormEl || !syncMetaEl) return;
+    desktopSyncSlot.append(syncFormEl, syncMetaEl);
+  }
+
+  function moveSyncToShared() {
+    if (!sharedHeaderCenter || !syncFormEl || !syncMetaEl) return;
+    sharedHeaderCenter.append(syncFormEl, syncMetaEl);
+  }
+
+  function updateToggleButton(btn, label, isOpen) {
+    if (!btn) return;
+    btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    btn.setAttribute('aria-label', label);
+    const labelEl = btn.querySelector('.mobile-expand-label');
+    if (labelEl) {
+      labelEl.textContent = label;
+    }
+  }
+
+  function setSidebarState({ queueOpen, sidebarCollapsed }) {
+    document.body.classList.toggle('queue-open', queueOpen);
+    document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+    if (mobileSidebarMedia.matches) {
+      updateToggleButton(refs.sidebarToggle, 'Inbox', false);
+      updateToggleButton(refs.sidebarBack, 'Chat', queueOpen);
+      return;
+    }
+    const label = sidebarCollapsed ? 'Inbox' : 'Chat';
+    updateToggleButton(refs.sidebarToggle, label, !sidebarCollapsed);
+    updateToggleButton(refs.sidebarBack, label, !sidebarCollapsed);
+  }
+
+  function syncSidebarForViewport() {
+    if (!mobileSidebarMedia.matches) {
+      document.body.classList.remove('sidebar-collapsed');
+      moveSyncToDesktop();
+      document.body.classList.remove('queue-open');
+      setSidebarState({
+        queueOpen: false,
+        sidebarCollapsed: false
+      });
+      return;
+    }
+    moveSyncToShared();
+    document.body.classList.remove('sidebar-collapsed');
+    setSidebarState({
+      queueOpen: document.body.classList.contains('queue-open'),
+      sidebarCollapsed: false
+    });
+  }
+
+  function openQueueView() {
+    if (mobileSidebarMedia.matches) {
+      setSidebarState({ queueOpen: true, sidebarCollapsed: false });
+    } else {
+      const nextCollapsed = !document.body.classList.contains('sidebar-collapsed');
+      setSidebarState({ queueOpen: false, sidebarCollapsed: nextCollapsed });
+    }
+  }
+
+  function closeQueueView() {
+    if (mobileSidebarMedia.matches) {
+      setSidebarState({ queueOpen: false, sidebarCollapsed: false });
+    }
+  }
+
+  if (refs.sidebarToggle) {
+    refs.sidebarToggle.addEventListener('click', openQueueView);
+  }
+  if (refs.sidebarBack) {
+    refs.sidebarBack.addEventListener('click', closeQueueView);
+  }
+
+  if (mobileSidebarMedia.addEventListener) {
+    mobileSidebarMedia.addEventListener('change', syncSidebarForViewport);
+  } else if (mobileSidebarMedia.addListener) {
+    mobileSidebarMedia.addListener(syncSidebarForViewport);
+  }
+  syncSidebarForViewport();
 
   const DEFAULT_PLACEHOLDER = refs.chatInput?.placeholder || 'Type a message…';
   const SUGGESTED_PLACEHOLDER = 'Press Enter to accept • or type to respond…';
@@ -436,6 +525,9 @@
     }
     if (variant === 'drawer') toggleDrawer(false);
     setActiveThread(threadId, { source: 'user' });
+    if (mobileSidebarMedia.matches && document.body.classList.contains('queue-open')) {
+      closeQueueView();
+    }
   }
 
   function handleTimelineClick(event) {

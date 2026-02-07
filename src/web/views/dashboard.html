@@ -1,21 +1,26 @@
 <div class="triage-app">
+  <header class="shared-header" id="shared-header">
+    <div class="shared-header-slot left">
+      <button class="mobile-expand nav-forward" id="sidebar-expand" type="button" aria-label="Inbox">
+        <span class="mobile-expand-label">Inbox</span>
+      </button>
+    </div>
+    <div class="shared-header-center">
+    </div>
+    <div class="shared-header-slot right">
+      <button class="mobile-expand nav-back" id="sidebar-back" type="button" aria-label="Chat">
+        <span class="mobile-expand-label">Chat</span>
+      </button>
+    </div>
+  </header>
   <section class="triage-shell" id="triage-shell">
     <aside class="chat-sidebar">
-      <header class="triage-header">
-        <div class="hero-left">
-          <div class="logo-mark" aria-hidden="true">W</div>
-          <div class="triage-title">
-            <p class="triage-label">Inbox Assistant</p>
-            <p class="hero-subtitle">Chat-first triage for your Gmail.</p>
-          </div>
-        </div>
-        <div class="triage-controls hero-actions">
-          <form id="ingest-form" action="/ingest" method="post">
-            <button class="sync-btn" type="submit">Sync</button>
-          </form>
-          <div class="sync-meta" id="sync-meta" aria-live="polite"></div>
-        </div>
-      </header>
+      <div class="triage-sync-bar" id="desktop-sync-slot">
+        <form id="ingest-form" action="/ingest" method="post">
+          <button class="sync-btn" type="submit">Sync</button>
+        </form>
+        <div class="sync-meta" id="sync-meta" aria-live="polite"></div>
+      </div>
       <p id="ingest-error" class="ingest-error hidden" role="alert"></p>
       <aside class="priority-queue queue-collapsible" id="priority-queue" aria-label="Priority Queue">
         <div class="review-queue-head priority-queue-head">
