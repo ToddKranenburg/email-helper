@@ -5,7 +5,7 @@ import type { OAuth2Client } from 'google-auth-library';
 import { gmailClient, INBOX_QUERY } from './client.js';
 import { extractUnsubscribeMetadata, type UnsubscribeMetadata } from './unsubscribe.js';
 import { prisma } from '../store/db.js';
-import { enqueuePrioritization } from '../prioritization/queue.js';
+import { enqueuePrioritization, enqueuePrioritizationNow } from '../prioritization/queue.js';
 
 const INITIAL_SYNC_DAYS = Number(process.env.INITIAL_SYNC_DAYS ?? 30);
 const INITIAL_SYNC_MAX_THREADS = Number(process.env.INITIAL_SYNC_MAX_THREADS ?? 1000);
@@ -308,7 +308,15 @@ export async function initialIndexBuildPrimaryInbox(
   });
 
   if (!opts.skipPriorityEnqueue) {
-    enqueuePrioritization(userId, Array.from(affectedThreadIds), 'initial_sync');
+    const hasPriorBatch = await prisma.prioritizationBatch.findFirst({
+      where: { userId },
+      select: { id: true }
+    });
+    if (hasPriorBatch) {
+      enqueuePrioritization(userId, Array.from(affectedThreadIds), 'initial_sync');
+    } else {
+      enqueuePrioritizationNow(userId, Array.from(affectedThreadIds), 'initial_sync', 'first');
+    }
   }
 
   return {

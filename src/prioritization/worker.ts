@@ -13,6 +13,9 @@ export const MAX_TOTAL_CHARS_PER_BATCH = 1_200_000;
 export const MAX_CHARS_PER_THREAD = 25_000;
 export const MAX_MESSAGES_PER_THREAD = 10;
 export const BATCH_TIME_BUDGET_SECONDS = 60;
+const FIRST_BATCH_MAX_THREADS = Number(process.env.PRIORITY_FIRST_BATCH_MAX_THREADS ?? 40);
+const FIRST_BATCH_MAX_TOTAL_CHARS = Number(process.env.PRIORITY_FIRST_BATCH_MAX_TOTAL_CHARS ?? 300_000);
+const FIRST_BATCH_TIME_BUDGET_SECONDS = Number(process.env.PRIORITY_FIRST_BATCH_TIME_BUDGET_SECONDS ?? 15);
 
 export type PrioritizationCandidate = {
   threadId: string;
@@ -140,7 +143,16 @@ async function fetchThreadContent(
   return { contentText: truncated };
 }
 
-export async function runPrioritizationBatch(userId: string, threadIds: string[], trigger: string) {
+export async function runPrioritizationBatch(
+  userId: string,
+  threadIds: string[],
+  trigger: string,
+  opts: { mode?: 'first' | 'normal' } = {}
+) {
+  const mode = opts.mode ?? 'normal';
+  const maxThreads = mode === 'first' ? FIRST_BATCH_MAX_THREADS : MAX_THREADS_PER_BATCH;
+  const maxTotalChars = mode === 'first' ? FIRST_BATCH_MAX_TOTAL_CHARS : MAX_TOTAL_CHARS_PER_BATCH;
+  const timeBudgetSeconds = mode === 'first' ? FIRST_BATCH_TIME_BUDGET_SECONDS : BATCH_TIME_BUDGET_SECONDS;
   const auth = await fetchGmailAuth(userId);
   if (!auth) {
     console.warn('[priority] missing gmail auth; skipping batch', { userId });
@@ -196,11 +208,11 @@ export async function runPrioritizationBatch(userId: string, threadIds: string[]
 
   try {
     for (const item of ordered) {
-    if (processed >= MAX_THREADS_PER_BATCH) {
+    if (processed >= maxThreads) {
       deferredThreadIds.push(item.threadId);
       continue;
     }
-    if ((Date.now() - start) / 1000 > BATCH_TIME_BUDGET_SECONDS) {
+    if ((Date.now() - start) / 1000 > timeBudgetSeconds) {
       deferredThreadIds.push(item.threadId);
       continue;
     }
@@ -239,7 +251,7 @@ export async function runPrioritizationBatch(userId: string, threadIds: string[]
       });
     }
 
-    if (totalChars + contentText.length > MAX_TOTAL_CHARS_PER_BATCH) {
+    if (totalChars + contentText.length > maxTotalChars) {
       deferredThreadIds.push(record.threadId);
       continue;
     }
@@ -301,7 +313,8 @@ export async function runPrioritizationBatch(userId: string, threadIds: string[]
       planned: ordered.length,
       processed,
       deferred: deferredThreadIds.length,
-      totalChars
+      totalChars,
+      mode
     });
   } catch (err) {
     await prisma.prioritizationBatch.update({

@@ -100,7 +100,7 @@ async function syncUser(user: SyncUser): Promise<'ok' | 'skipped' | 'error'> {
     const result = await ingestInboxWithClient(auth, user.id, { skipPriorityEnqueue: true });
     if (result.affectedThreadIds.length) {
       try {
-        await runPrioritizationBatch(user.id, result.affectedThreadIds, `batch_sync_${result.mode}`);
+        await runPrioritizationBatch(user.id, result.affectedThreadIds, `batch_sync_${result.mode}`, { mode: 'normal' });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn('[batch-sync] prioritization failed', { userId: user.id, error: message });

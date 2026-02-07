@@ -5,6 +5,9 @@
   const priorityProgress = bootstrap.priorityProgress && typeof bootstrap.priorityProgress === 'object'
     ? bootstrap.priorityProgress
     : null;
+  const syncMeta = window.SYNC_META && typeof window.SYNC_META === 'object'
+    ? window.SYNC_META
+    : null;
   const priorityBatchFinishedAt = typeof bootstrap.priorityBatchFinishedAt === 'string'
     ? bootstrap.priorityBatchFinishedAt
     : null;
@@ -39,6 +42,7 @@
     scheduling: /\b(meeting|call|calendar|schedule|reschedule|availability|zoom|appointment|rsvp|invite)\b/i
   };
   window.SECRETARY_BOOTSTRAP = undefined;
+  window.SYNC_META = undefined;
   const debugEnabled = true;
   const logDebug = (...args) => {
     if (!debugEnabled) return;
@@ -183,6 +187,7 @@
     typing: false,
     totalLoaded: threads.length,
     totalInboxCount: TOTAL_ITEMS,
+    totalInboxCountKnown: Boolean(syncMeta?.lastSyncAt),
     pageSize: PAGE_SIZE,
     hasMore: HAS_MORE,
     nextPage: NEXT_PAGE,
@@ -1615,6 +1620,11 @@
 
   function updateHeaderCount() {
     if (!refs.count) return;
+    if (!state.totalInboxCountKnown) {
+      refs.count.textContent = 'Inbox count unavailable';
+      updateLoadMoreButtons();
+      return;
+    }
     const total = state.totalInboxCount || getLoadedCount();
     let label = '0 emails in inbox';
     if (total > 0) {
@@ -1626,6 +1636,10 @@
 
   function updateQueuePill() {
     if (!refs.queuePill) return;
+    if (!state.totalInboxCountKnown) {
+      refs.queuePill.textContent = 'Sync to load count';
+      return;
+    }
     const total = state.totalInboxCount || getLoadedCount();
     if (total > 0) {
       refs.queuePill.textContent = `${total} in inbox`;
@@ -1783,7 +1797,11 @@
       const progress = normalizePriorityProgress(data.progress);
       if (progress) {
         state.priorityProgress = progress;
+        state.totalInboxCount = progress.totalCount;
+        state.totalInboxCountKnown = true;
         updatePriorityProgress();
+        updateHeaderCount();
+        updateQueuePill();
         if (progress.prioritizedCount >= progress.totalCount) {
           setPriorityLoading(false);
           if (state.prioritySyncStartAt) {
@@ -1825,6 +1843,8 @@
     const progress = normalizePriorityProgress(payload?.progress);
     if (progress) {
       state.priorityProgress = progress;
+      state.totalInboxCount = progress.totalCount;
+      state.totalInboxCountKnown = true;
     }
 
     updateHeaderCount();
