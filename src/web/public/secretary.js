@@ -167,6 +167,24 @@
   const syncMetaEl = document.getElementById('sync-meta');
   const composerEl = document.querySelector('.assistant-controls');
   const viewport = window.visualViewport;
+<<<<<<< Updated upstream
+=======
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let isRecording = false;
+  let isStopping = false;
+  let voiceBaseValue = '';
+  let voiceFinal = '';
+  let voiceLast = '';
+  let voiceCommittedValue = '';
+  let voiceFinalizedTranscript = '';
+  let voiceSessionId = 0;
+  let voiceRefineController = null;
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let mediaChunks = [];
+  let isRefining = false;
+>>>>>>> Stashed changes
 
   function moveSyncToDesktop() {
     if (!desktopSyncSlot || !syncFormEl || !syncMetaEl) return;
@@ -258,6 +276,318 @@
     }, 700);
   }
 
+<<<<<<< Updated upstream
+=======
+  function setVoiceUI(recording) {
+    if (refs.micButton) {
+      refs.micButton.classList.toggle('is-recording', recording);
+      refs.micButton.setAttribute('aria-pressed', recording ? 'true' : 'false');
+      refs.micButton.setAttribute('aria-label', recording ? 'Stop voice input' : 'Start voice input');
+    }
+  }
+
+  function setVoiceStatus(mode) {
+    if (!refs.voiceStatus || !refs.voiceLabel) return;
+    if (!mode) {
+      refs.voiceStatus.classList.add('hidden');
+      refs.voiceLabel.textContent = 'Listening…';
+      return;
+    }
+    refs.voiceStatus.classList.remove('hidden');
+    refs.voiceLabel.textContent = mode;
+  }
+
+  function applyVoiceText(text, isFinal) {
+    if (!refs.chatInput) return;
+    const trimmed = text.trim();
+    const spacer = voiceBaseValue && trimmed ? ' ' : '';
+    refs.chatInput.value = `${voiceBaseValue}${spacer}${trimmed}`.trimStart();
+    if (isFinal) {
+      refs.chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  function finalizeVoice() {
+    const finalText = voiceLast || voiceFinal;
+    const keepStatus = isRefining || isStopping;
+    isRecording = false;
+    isStopping = false;
+    setVoiceUI(false);
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+    }
+    applyVoiceText(finalText, true);
+    voiceCommittedValue = refs.chatInput?.value || '';
+    voiceFinalizedTranscript = finalText;
+    if (!keepStatus) {
+      setVoiceStatus(null);
+    }
+    refs.chatInput?.focus();
+  }
+
+  function stopVoice() {
+    if (!isRecording || isStopping) return;
+    isStopping = true;
+    setVoiceUI(false);
+    setVoiceStatus('Refining…');
+    queueVoiceRefine(voiceSessionId);
+    if (recognition) {
+      try {
+        recognition.stop();
+        return;
+      } catch (err) {
+        logDebug('voice stop failed', err);
+      }
+    }
+    finalizeVoice();
+  }
+
+  function pickAudioMimeType() {
+    if (!window.MediaRecorder || typeof window.MediaRecorder.isTypeSupported !== 'function') return '';
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+      'audio/mpeg'
+    ];
+    return candidates.find(type => window.MediaRecorder.isTypeSupported(type)) || '';
+  }
+
+  async function startAudioCapture() {
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return false;
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1
+        }
+      });
+    } catch (err) {
+      logDebug('voice media denied', err);
+      return false;
+    }
+    mediaChunks = [];
+    const mimeType = pickAudioMimeType();
+    try {
+      mediaRecorder = mimeType
+        ? new MediaRecorder(mediaStream, { mimeType })
+        : new MediaRecorder(mediaStream);
+    } catch (err) {
+      logDebug('voice recorder init failed', err);
+      mediaRecorder = null;
+      mediaStream?.getTracks().forEach(track => track.stop());
+      mediaStream = null;
+      return false;
+    }
+    mediaRecorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) {
+        mediaChunks.push(event.data);
+      }
+    };
+    mediaRecorder.start();
+    return true;
+  }
+
+  function stopAudioCapture() {
+    return new Promise(resolve => {
+      if (!mediaRecorder) {
+        resolve(null);
+        return;
+      }
+      const recorder = mediaRecorder;
+      recorder.onstop = () => {
+        const blob = mediaChunks.length ? new Blob(mediaChunks, { type: recorder.mimeType }) : null;
+        mediaRecorder = null;
+        mediaChunks = [];
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+        }
+        mediaStream = null;
+        resolve(blob);
+      };
+      try {
+        recorder.stop();
+      } catch (err) {
+        logDebug('voice recorder stop failed', err);
+        mediaRecorder = null;
+        mediaChunks = [];
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+        }
+        mediaStream = null;
+        resolve(null);
+      }
+    });
+  }
+
+  async function requestVoiceRefine(blob, sessionId) {
+    if (!blob) {
+      setVoiceStatus(null);
+      return;
+    }
+    if (voiceRefineController) {
+      voiceRefineController.abort();
+    }
+    voiceRefineController = new AbortController();
+    try {
+      const formData = new FormData();
+      const extension = blob.type.includes('webm') ? 'webm' : blob.type.includes('mp4') ? 'm4a' : 'wav';
+      formData.append('audio', blob, `voice.${extension}`);
+      formData.append('language', 'en');
+      if (voiceFinalizedTranscript) {
+        formData.append('hint', voiceFinalizedTranscript.slice(0, 200));
+      }
+      const response = await fetch('/api/transcribe', {
+        method: 'POST',
+        body: formData,
+        signal: voiceRefineController.signal
+      });
+      if (!response.ok) {
+        setVoiceStatus(null);
+        return;
+      }
+      const payload = await response.json();
+      if (!payload || typeof payload.text !== 'string') {
+        setVoiceStatus(null);
+        return;
+      }
+      if (sessionId !== voiceSessionId) {
+        setVoiceStatus(null);
+        return;
+      }
+      const refined = payload.text.trim();
+      if (!refined) {
+        setVoiceStatus(null);
+        return;
+      }
+      const fallbackTranscript = voiceFinalizedTranscript || voiceLast || voiceFinal;
+      if (fallbackTranscript) {
+        const refinedWords = refined.toLowerCase().split(/\s+/).filter(Boolean);
+        const fallbackWords = fallbackTranscript.toLowerCase().split(/\s+/).filter(Boolean);
+        const fallbackSet = new Set(fallbackWords);
+        const overlap = refinedWords.filter(word => fallbackSet.has(word)).length;
+        const overlapRatio = fallbackWords.length ? overlap / fallbackWords.length : 1;
+        const lengthRatio = fallbackTranscript.length
+          ? refined.length / fallbackTranscript.length
+          : 1;
+        if (fallbackWords.length >= 4 && (overlapRatio < 0.35 || lengthRatio < 0.5)) {
+          setVoiceStatus(null);
+          return;
+        }
+      }
+      const spacer = voiceBaseValue && refined ? ' ' : '';
+      const nextValue = `${voiceBaseValue}${spacer}${refined}`.trimStart();
+      if (refs.chatInput && refs.chatInput.value === voiceCommittedValue) {
+        refs.chatInput.value = nextValue;
+        refs.chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+        voiceCommittedValue = nextValue;
+      }
+      setVoiceStatus(null);
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        logDebug('voice refine failed', err);
+      }
+      setVoiceStatus(null);
+    }
+  }
+
+  function queueVoiceRefine(sessionId) {
+    if (isRefining) return;
+    isRefining = true;
+    stopAudioCapture().then(blob => {
+      isRefining = false;
+      requestVoiceRefine(blob, sessionId);
+    });
+  }
+
+  function startVoice() {
+    if (!SpeechRecognition || !refs.micButton || !refs.chatInput) return;
+    if (isRecording) return;
+    voiceSessionId += 1;
+    if (voiceRefineController) {
+      voiceRefineController.abort();
+    }
+    startAudioCapture();
+    try {
+      recognition = new SpeechRecognition();
+    } catch (err) {
+      logDebug('voice init failed', err);
+      return;
+    }
+    voiceBaseValue = refs.chatInput.value.trim();
+    voiceFinal = '';
+    voiceLast = '';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = 'en-US';
+    recognition.onresult = event => {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript || '';
+        if (result.isFinal) {
+          voiceFinal = `${voiceFinal} ${transcript}`.trim();
+        } else {
+          interim = `${interim} ${transcript}`.trim();
+        }
+      }
+      voiceLast = `${voiceFinal} ${interim}`.trim();
+      applyVoiceText(voiceLast, false);
+    };
+    recognition.onerror = event => {
+      logDebug('voice error', event);
+      finalizeVoice();
+      if (refs.chatError) {
+        refs.chatError.textContent = 'Voice input stopped. Check microphone permissions.';
+        refs.chatError.classList.remove('hidden');
+      }
+    };
+    recognition.onend = () => {
+      if (isRecording && !isStopping) {
+        isStopping = true;
+        setVoiceUI(false);
+        setVoiceStatus('Refining…');
+        queueVoiceRefine(voiceSessionId);
+      }
+      finalizeVoice();
+    };
+    isRecording = true;
+    isStopping = false;
+    setVoiceUI(true);
+    setVoiceStatus('Listening…');
+    refs.chatError?.classList.add('hidden');
+    try {
+      recognition.start();
+    } catch (err) {
+      logDebug('voice start failed', err);
+      finalizeVoice();
+      return;
+    }
+    refs.chatInput.focus();
+  }
+
+  if (refs.micButton) {
+    if (!SpeechRecognition) {
+      refs.micButton.disabled = true;
+      refs.micButton.title = 'Voice input is not supported in this browser.';
+    } else {
+      refs.micButton.addEventListener('click', () => {
+        if (isRecording) {
+          stopVoice();
+        } else {
+          startVoice();
+        }
+      });
+    }
+  }
+
+>>>>>>> Stashed changes
   if (refs.chatScroll) {
     refs.chatScroll.addEventListener('scroll', () => {
       showScrollbarTemporarily();

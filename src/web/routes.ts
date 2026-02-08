@@ -5,6 +5,7 @@ import { loadPriorityQueue, priorityQueueWhere, type PriorityEntry } from '../ac
 import { prisma } from '../store/db.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import multer from 'multer';
 import { chatAboutEmail, MAX_CHAT_TURNS, type ChatTurn } from '../llm/secretaryChat.js';
 import { gmailClient } from '../gmail/client.js';
 import { getAuthedClient, getMissingGmailScopes, MissingScopeError } from '../auth/google.js';
@@ -19,6 +20,7 @@ import { createGoogleTask, normalizeDueDate } from '../tasks/createTask.js';
 import { generateGuidedReplyDraft, generateReplyDraft } from '../llm/replyDraft.js';
 import { getIngestStatus } from '../gmail/ingestStatus.js';
 import { triggerBackgroundIngest } from '../gmail/ingestTrigger.js';
+import { transcribeAudio } from '../llm/transcribe.js';
 import {
   ensureAutoSummaryCards,
   fetchTimeline,
@@ -39,6 +41,10 @@ const REVIEW_PROMPT = 'Give me a concise, easy-to-digest rundown of this email. 
 const SCOPE_UPGRADE_PATH = '/auth/google?upgrade=1';
 const REPLY_DRAFT_MIN_CONFIDENCE = 0.75;
 const isAuthenticated = (sessionData: any) => Boolean(sessionData?.googleTokens?.access_token && sessionData?.user?.id);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
 
 router.use((req, res, next) => {
   if (req.path === '/') return next();
@@ -1009,6 +1015,39 @@ router.post('/secretary/action/execute', async (req: Request, res: Response) => 
       : 'Unable to process that action right now. Please try again.';
     console.error('action execute failed', err);
     return res.status(500).json({ error: reason });
+  }
+});
+
+router.post('/api/transcribe', upload.single('audio'), async (req: Request, res: Response) => {
+  const sessionData = req.session as any;
+  if (!sessionData.googleTokens || !sessionData.user?.id) {
+    return res.status(401).json({ error: 'Authenticate with Google first.' });
+  }
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: 'Missing audio file.' });
+  const language = 'en';
+  const hint = typeof req.body?.hint === 'string' ? req.body.hint.trim() : '';
+  const basePrompt = [
+    'Short voice command about email triage.',
+    'Expect phrases like: "archive this", "reply", "summarize", "create task", "skip", "open link".'
+  ].join(' ');
+  const prompt = hint ? `${basePrompt} Possible transcript: ${hint}` : basePrompt;
+
+  try {
+    const text = await transcribeAudio({
+      buffer: file.buffer,
+      filename: file.originalname || 'voice.webm',
+      mimeType: file.mimetype,
+      language,
+      prompt
+    });
+    return res.json({ text });
+  } catch (err: any) {
+    if (err?.message === 'OpenAI not configured') {
+      return res.status(503).json({ error: 'Speech transcription is not configured.' });
+    }
+    console.error('transcribe failed', err);
+    return res.status(500).json({ error: 'Unable to transcribe audio right now. Please try again.' });
   }
 });
 
