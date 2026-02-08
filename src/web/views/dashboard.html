@@ -8,11 +8,17 @@
     <div class="shared-header-center">
     </div>
     <div class="shared-header-slot right">
+      <form class="logout-form" action="/logout" method="post">
+        <button class="logout-btn" type="submit">Log out</button>
+      </form>
       <button class="mobile-expand nav-back" id="sidebar-back" type="button" aria-label="Chat">
         <span class="mobile-expand-label">Chat</span>
       </button>
     </div>
   </header>
+  <form class="logout-fab" action="/logout" method="post">
+    <button class="logout-btn" type="submit" aria-label="Log out">Log out</button>
+  </form>
   <section class="triage-shell" id="triage-shell">
     <aside class="chat-sidebar">
       <div class="triage-sync-bar" id="desktop-sync-slot">

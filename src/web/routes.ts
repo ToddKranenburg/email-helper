@@ -47,6 +47,11 @@ router.use((req, res, next) => {
   return res.redirect('/');
 });
 
+router.post('/logout', (req: Request, res: Response) => {
+  req.session = null;
+  res.redirect('/');
+});
+
 router.use(async (req, _res, next) => {
   const sessionData = req.session as any;
   if (sessionData?.user?.id && sessionData?.user?.email) {
