@@ -149,7 +149,10 @@
     sidebarBack: document.getElementById('sidebar-back'),
     actionsDropdown: document.getElementById('assistant-dropdown'),
     actionsToggle: document.getElementById('assistant-actions-toggle'),
-    actionsMenu: document.getElementById('assistant-actions-menu')
+    actionsMenu: document.getElementById('assistant-actions-menu'),
+    micButton: document.getElementById('assistant-mic'),
+    voiceStatus: document.getElementById('assistant-voice-status'),
+    voiceLabel: document.getElementById('assistant-voice-label')
   };
   const loadingOverlay = document.getElementById('loading');
   const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
@@ -167,6 +170,13 @@
   const syncMetaEl = document.getElementById('sync-meta');
   const composerEl = document.querySelector('.assistant-controls');
   const viewport = window.visualViewport;
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let isRecording = false;
+  let isStopping = false;
+  let voiceBaseValue = '';
+  let voiceFinal = '';
+  let voiceLast = '';
 
   function moveSyncToDesktop() {
     if (!desktopSyncSlot || !syncFormEl || !syncMetaEl) return;
@@ -256,6 +266,141 @@
     scrollHideTimer = window.setTimeout(() => {
       refs.chatScroll?.classList.remove('is-scrolling');
     }, 700);
+  }
+
+  function setVoiceUI(recording) {
+    if (refs.micButton) {
+      refs.micButton.classList.toggle('is-recording', recording);
+      refs.micButton.setAttribute('aria-pressed', recording ? 'true' : 'false');
+      refs.micButton.setAttribute('aria-label', recording ? 'Stop voice input' : 'Start voice input');
+    }
+    if (refs.voiceStatus) {
+      refs.voiceStatus.classList.toggle('hidden', !recording);
+    }
+  }
+
+  function applyVoiceText(text, isFinal) {
+    if (!refs.chatInput) return;
+    const trimmed = text.trim();
+    const spacer = voiceBaseValue && trimmed ? ' ' : '';
+    refs.chatInput.value = `${voiceBaseValue}${spacer}${trimmed}`.trimStart();
+    if (isFinal) {
+      refs.chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  function finalizeVoice() {
+    const finalText = voiceLast || voiceFinal;
+    isRecording = false;
+    isStopping = false;
+    setVoiceUI(false);
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+    }
+    applyVoiceText(finalText, true);
+    refs.chatInput?.focus();
+  }
+
+  function stopVoice() {
+    if (!isRecording || isStopping) return;
+    isStopping = true;
+    setVoiceUI(false);
+    if (recognition) {
+      try {
+        recognition.stop();
+        return;
+      } catch (err) {
+        logDebug('voice stop failed', err);
+      }
+    }
+    finalizeVoice();
+  }
+
+  function startVoice() {
+    if (!SpeechRecognition || !refs.micButton || !refs.chatInput) return;
+    if (isRecording) return;
+    try {
+      recognition = new SpeechRecognition();
+    } catch (err) {
+      logDebug('voice init failed', err);
+      return;
+    }
+    logDebug('voice start', { lang: recognition.lang || navigator.language });
+    voiceBaseValue = refs.chatInput.value.trim();
+    voiceFinal = '';
+    voiceLast = '';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    if (typeof navigator !== 'undefined' && navigator.language) {
+      recognition.lang = navigator.language;
+    }
+    recognition.onresult = event => {
+      logDebug('voice result', { resultIndex: event.resultIndex, resultCount: event.results.length });
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript || '';
+        if (result.isFinal) {
+          voiceFinal = `${voiceFinal} ${transcript}`.trim();
+        } else {
+          interim = `${interim} ${transcript}`.trim();
+        }
+      }
+      voiceLast = `${voiceFinal} ${interim}`.trim();
+      logDebug('voice transcript', { final: voiceFinal, interim, combined: voiceLast });
+      applyVoiceText(voiceLast, false);
+    };
+    recognition.onerror = event => {
+      logDebug('voice error', event);
+      finalizeVoice();
+      if (refs.chatError) {
+        refs.chatError.textContent = 'Voice input stopped. Check microphone permissions.';
+        refs.chatError.classList.remove('hidden');
+      }
+    };
+    recognition.onend = () => {
+      logDebug('voice end', { isRecording, isStopping, final: voiceFinal, last: voiceLast });
+      if (isRecording || isStopping) {
+        finalizeVoice();
+      }
+    };
+    isRecording = true;
+    isStopping = false;
+    setVoiceUI(true);
+    refs.chatError?.classList.add('hidden');
+    try {
+      recognition.start();
+    } catch (err) {
+      logDebug('voice start failed', err);
+      finalizeVoice();
+      return;
+    }
+    refs.chatInput.focus();
+  }
+
+  if (refs.micButton) {
+    if (!SpeechRecognition) {
+      refs.micButton.disabled = true;
+      refs.micButton.title = 'Voice input is not supported in this browser.';
+    } else {
+      refs.micButton.addEventListener('click', () => {
+        if (isRecording) {
+          stopVoice();
+        } else {
+          startVoice();
+        }
+      });
+    }
+  }
+  if (refs.micButton) {
+    logDebug('voice support', {
+      supported: Boolean(SpeechRecognition),
+      secure: window.isSecureContext,
+      userAgent: navigator.userAgent
+    });
   }
 
   if (refs.chatScroll) {
@@ -683,6 +828,9 @@
   async function handleChatSubmit(event) {
     event.preventDefault();
     if (!state.activeId) return;
+    if (isRecording) {
+      stopVoice();
+    }
     markUserEngagedIfInbox(state.activeId);
     const question = refs.chatInput.value.trim();
     if (!question) return;

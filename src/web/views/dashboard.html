@@ -179,11 +179,19 @@
                   </div>
                 </div>
               </div>
+              <button class="assistant-mic" id="assistant-mic" type="button" aria-pressed="false" aria-label="Start voice input">
+                <span class="mic-icon" aria-hidden="true">🎤</span>
+                <span class="stop-icon" aria-hidden="true">■</span>
+              </button>
               <form id="assistant-form" class="assistant-input">
                 <label class="sr-only" for="assistant-input-field">Ask the assistant anything</label>
                 <textarea id="assistant-input-field" placeholder="Type a message…" rows="1"></textarea>
                 <button type="submit">Send</button>
               </form>
+            </div>
+            <div class="assistant-voice-status hidden" id="assistant-voice-status" aria-live="polite">
+              <span class="voice-pulse" aria-hidden="true"></span>
+              <span class="voice-label" id="assistant-voice-label">Listening…</span>
             </div>
             <div class="assistant-meta">
               <span class="chat-error hidden" id="assistant-error"></span>
