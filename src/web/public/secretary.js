@@ -166,6 +166,7 @@
   const syncFormEl = document.getElementById('ingest-form');
   const syncMetaEl = document.getElementById('sync-meta');
   const composerEl = document.querySelector('.assistant-controls');
+  const viewport = window.visualViewport;
 
   function moveSyncToDesktop() {
     if (!desktopSyncSlot || !syncFormEl || !syncMetaEl) return;
@@ -271,12 +272,32 @@
     ensureFooterSpacer();
   }
 
+  function updateKeyboardInset() {
+    if (!viewport) return;
+    const keyboardHeight = Math.max(0, window.innerHeight - (viewport.height + viewport.offsetTop));
+    document.documentElement.style.setProperty('--keyboard-h', `${Math.ceil(keyboardHeight)}px`);
+    if (keyboardHeight > 0 && document.activeElement === refs.chatInput) {
+      scrollChatToBottom();
+    }
+  }
+
   if (composerEl && 'ResizeObserver' in window) {
     const observer = new ResizeObserver(() => updateComposerHeight());
     observer.observe(composerEl);
   }
+  if (viewport) {
+    viewport.addEventListener('resize', updateKeyboardInset);
+    viewport.addEventListener('scroll', updateKeyboardInset);
+  }
+  if (refs.chatInput) {
+    refs.chatInput.addEventListener('focus', updateKeyboardInset);
+    refs.chatInput.addEventListener('blur', () => {
+      document.documentElement.style.setProperty('--keyboard-h', '0px');
+    });
+  }
   window.addEventListener('resize', updateComposerHeight);
   updateComposerHeight();
+  updateKeyboardInset();
 
   function setActionsOpen(open) {
     if (!refs.actionsDropdown || !refs.actionsToggle) return;
@@ -3122,7 +3143,8 @@
   function nudgeComposer(message, options = {}) {
     if (!refs.chatForm || !refs.chatInput || refs.chatInput.disabled) return;
     const { focus = true } = options;
-    if (focus) refs.chatInput.focus();
+    const isMobileViewport = window.matchMedia && window.matchMedia('(max-width: 1024px)').matches;
+    if (focus && !isMobileViewport) refs.chatInput.focus();
     const label = message && message.trim() ? message.trim() : DEFAULT_NUDGE;
     refs.chatForm.dataset.nudge = label;
     refs.chatForm.classList.add('nudged');
