@@ -2281,6 +2281,8 @@
   </div>
 
 <script>
+  const initialSyncMeta = window.SYNC_META || null;
+
   // Centralized ingest submission so we can hide spinner on failures.
   document.addEventListener('DOMContentLoaded', function () {
     const form = document.getElementById('ingest-form');
@@ -2288,7 +2290,6 @@
     const errorBox = document.getElementById('ingest-error');
     const loadingText = overlay ? overlay.querySelector('.loading-text') : null;
     const syncMetaEl = document.getElementById('sync-meta');
-    const initialSyncMeta = window.SYNC_META || null;
     let ingestInFlight = false;
 
     function updateSyncMeta(meta) {
